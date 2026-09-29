@@ -6,6 +6,11 @@ Le **BFF est Azure API Management** : il n'y a aucun code applicatif. Des polici
 
 Cas d'usage : un chat qui donne la météo d'une ville. Les outils MCP connaissent l'utilisateur (`whoami`, favoris par utilisateur).
 
+> 📚 **Documentation détaillée** dans le répertoire [docs/](docs/) :
+> - [Architecture et flux d'authentification](docs/ARCHITECTURE.md) : schéma de flux, diagramme de séquence, jetons, contrôles de sécurité ;
+> - [Configuration Keycloak (myID)](docs/KEYCLOAK.md) ;
+> - [Principes d'authentification (Word)](docs/Authentification-principes.docx).
+
 ## Architecture
 
 ```
@@ -81,6 +86,7 @@ platform/
   .env.example                    paramètres de déploiement → copier en platform/.env
 tools/e2e_test.py                 test de bout en bout et de sécurité (lancé par deploy.ps1)
 tools/fake_idp.py                 faux émetteur OIDC (avec token exchange) pour les tests locaux
+docs/ARCHITECTURE.md              architecture et flux d'authentification (avec diagrammes)
 docs/KEYCLOAK.md                  configuration Keycloak / transposition au vrai myID
 docs/Authentification-principes.docx, docs/diagrams/   principes d'authentification et diagrammes
 deploy.ps1 / teardown.ps1         déploiement / suppression d'un environnement (un resource group)

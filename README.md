@@ -13,40 +13,13 @@ Cas d'usage : un chat qui donne la météo d'une ville. Les outils MCP connaisse
 
 ## Architecture
 
-```
-┌──────────────────┐  1. login PKCE   ┌──────────────────────┐
-│ App web statique │◄────────────────►│ Keycloak (myID)       │
-│ (ca-web, nginx)  │  jeton A          │ realm "weather"       │
-└────────┬─────────┘  aud=weather-bff  └──────────▲───────────┘
-         │ 2. Bearer A                             │ 3. token-exchange A → B (RFC 8693)
-         ▼                                         │    client confidentiel weather-bff
-┌─────────────────────────────────────┐            │    B : aud=weather-mcp, azp=weather-bff
-│ APIM (public) – API « chat » = BFF   │────────────┘
-│ cors · refus des en-têtes d'identité │
-│ validate-jwt A (azp=weather-mobile)  │
-│ échange A → B (cache) + validation B │
-│ corps en liste blanche · rate-limit  │
-└────────┬────────────────────────────┘
-         │ 4. Bearer <Entra, identité managée DÉDIÉE id-apim-chat>
-         │    x-ms-user-identity: oidc:<sha256(iss|sub)>   → isolation Foundry par utilisateur
-         │    x-client-mcp-token: B                        → seul préfixe transmis au conteneur
-         ▼
-┌─────────────────────────────────────┐
-│ Agent hébergé Foundry               │  Agent Framework + ResponsesHostServer
-│ pré-contrôle de B (401 sinon)       │  MCPStreamableHTTPTool(header_provider=...)
-└────────┬────────────────────────────┘
-         │ 5. Bearer B
-         ▼
-┌─────────────────────────────────────┐
-│ Serveur MCP (Container Apps)        │  FastMCP, resource server OAuth 2.1 (RFC 9728)
-│ valide iss/aud/exp/scope,           │
-│ azp = weather-bff, identité = sub   │
-└─────────────────────────────────────┘
-```
+![Architecture : myID (Keycloak) → API Management (BFF) → agent hébergé Foundry → serveur MCP](docs/diagrams/architecture.png)
+
+Détail des flux, des jetons et des contrôles : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 | Problème | Solution |
 |---|---|
-| `"tools": Not allowed when agent is specified` | Les outils sont définis **dans le code de l'agent hébergé**. APIM reconstruit le corps de la requête : seuls `input`, `previous_response_id` et `agent_session_id` passent. |
+| `"tools": Not allowed when agent is specified` | Les outils sont définis **dans le code de l'agent hébergé**. APIM reconstruit le corps de la requête : seuls `input` et `previous_response_id` passent (la session de l'agent est imposée par la passerelle). |
 | Foundry n'accepte que des jetons Entra | APIM appelle Foundry avec une **identité managée dédiée** (`id-apim-chat`) et délègue l'identité de l'utilisateur via `x-ms-user-identity` (rôle custom `UserIdentityImpersonation`). |
 | Le conteneur ne reçoit pas `Authorization` | Le jeton MCP passe dans l'en-tête **`x-client-mcp-token`**. Les en-têtes `x-client-*` sont les seuls en-têtes personnalisés que la passerelle Foundry transmet. |
 | Pas de jeton MCP sur le terminal | **OBO** : seul APIM (client confidentiel `weather-bff`) peut obtenir B, et le MCP n'accepte que `azp=weather-bff`. |

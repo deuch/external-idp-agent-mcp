@@ -1,0 +1,40 @@
+<policies>
+	<!--
+  GET /chat/me : identity of the caller as validated by the gateway (debug panel of the web app).
+  Only decoded claims are returned, never a token.
+-->
+	<inbound>
+		<base />
+		<return-response>
+			<set-status code="200" reason="OK" />
+			<set-header name="Content-Type" exists-action="override">
+				<value>application/json</value>
+			</set-header>
+			<set-header name="Cache-Control" exists-action="override">
+				<value>no-store</value>
+			</set-header>
+			<set-header name="Access-Control-Allow-Origin" exists-action="override">
+				<value>{{web-origin}}</value>
+			</set-header>
+			<set-body>@{
+				var jwt = (Jwt)context.Variables["appJwt"];
+				var scopes = new JArray(jwt.Claims.GetValueOrDefault("scope", "").Split(' ').Where(s => s.Length > 0).ToArray());
+				return new JObject(
+					new JProperty("sub", jwt.Subject),
+					new JProperty("delegated_identity", (string)context.Variables["delegatedIdentity"]),
+					new JProperty("scopes", scopes),
+					new JProperty("expires_at", jwt.ExpirationTime.HasValue ? jwt.ExpirationTime.Value.ToString("o") : "")
+				).ToString(Newtonsoft.Json.Formatting.None);
+			}</set-body>
+		</return-response>
+	</inbound>
+	<backend>
+		<base />
+	</backend>
+	<outbound>
+		<base />
+	</outbound>
+	<on-error>
+		<base />
+	</on-error>
+</policies>

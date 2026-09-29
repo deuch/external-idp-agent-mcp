@@ -1,0 +1,11 @@
+.venv/
+.venv-dev/
+__pycache__/
+*.pyc
+.env
+!.env.example
+azd-ai-agents-*.log
+*.egg-info/
+
+# Local deployment snapshots (contain subscription / tenant / resource identifiers)
+backups/

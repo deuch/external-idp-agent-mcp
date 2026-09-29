@@ -1,0 +1,48 @@
+sequenceDiagram
+    autonumber
+    actor U as Utilisateur
+    participant App as App mobile<br/>(client public weather-mobile)
+    participant KC as myID = Keycloak<br/>(realm, émetteur unique)
+    participant BFF as APIM · API chat (BFF)<br/>client confidentiel weather-bff
+    participant Entra as Microsoft<br/>Entra ID
+    participant GW as Gateway<br/>Foundry
+    participant Agent as Agent hébergé
+    participant MCP as Serveur MCP<br/>(ressource weather-mcp)
+
+    rect rgb(235, 243, 255)
+    Note over U,KC: Phase 1 - Authentification unique chez myID (Authorization Code + PKCE)
+    U->>App: Ouvre l'application
+    App->>KC: /auth (client_id=weather-mobile, code_challenge S256, scope=openid)
+    KC->>U: Page de login myID (navigateur système) + MFA
+    U->>KC: Identifiants
+    KC-->>App: Code d'autorisation
+    App->>KC: /token (code + code_verifier)
+    KC-->>App: Jeton A (aud=weather-bff, azp=weather-mobile) + refresh token rotatif
+    end
+
+    rect rgb(255, 247, 235)
+    Note over U,MCP: Phase 2 - Appel du chat : échange de jeton (OBO) côté serveur puis propagation
+    U->>App: "Quel temps fait-il à Lyon ?"
+    App->>BFF: POST /chat/responses · Authorization: Bearer A
+    Note right of BFF: Refuse les en-têtes d'identité · valide A (JWKS myID) :<br/>iss, aud∋weather-bff, azp=weather-mobile, exp<br/>corps en liste blanche (input, previous_response_id)
+    alt B absent du cache
+        BFF->>KC: /token grant=token-exchange<br/>subject_token=A · audience=weather-mcp · scope=weather:read favorites:write<br/>(auth client weather-bff : secret en POC, private_key_jwt ou mTLS en production)
+        Note right of KC: Standard Token Exchange V2 :<br/>weather-bff confidentiel, ∈ aud de A,<br/>scopes autorisés pour ce client et cet utilisateur
+        KC-->>BFF: Jeton B (aud=weather-mcp, azp=weather-bff, même sub, 5 min)
+        Note right of BFF: Met B en cache<br/>clé = hash(A) · TTL = exp(B) - 60 s
+    end
+    Note right of BFF: Vérifie B : même sub que A, azp=weather-bff, weather:read
+    BFF->>Entra: Jeton managed identity
+    Entra-->>BFF: Jeton E (identité managée dédiée d'APIM)
+    BFF->>GW: POST /responses · Bearer E<br/>x-ms-user-identity: oidc:sha256(iss|sub) · x-client-mcp-token: B<br/>agent_session_id dérivé de l'identité (jamais fourni par le client)
+    Note right of GW: RBAC + UserIdentityImpersonation<br/>isolation par utilisateur
+    GW->>Agent: /responses (Authorization retiré, x-client-* transmis)
+    Note right of Agent: Pré-contrôle de B (JWKS, aud=weather-mcp, exp), sinon 401<br/>B lié à la requête (ContextVar), jamais dans le prompt
+    Agent->>MCP: tools/call get_weather · Authorization: Bearer B
+    Note left of MCP: Valide B : iss=realm myID, aud∋weather-mcp,<br/>azp=weather-bff, scope, exp · identité = sub
+    MCP-->>Agent: Résultat pour sub
+    Agent-->>GW: Réponse
+    GW-->>BFF: Réponse
+    BFF-->>App: Texte de la réponse (aucun jeton)
+    end
+

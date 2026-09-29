@@ -1,0 +1,14 @@
+<fragment>
+	<!--
+  Calls the Foundry hosted agent with the DEDICATED managed identity of the chat API (Entra token E),
+  declares the end user (x-ms-user-identity) and forwards token B in the only header prefix the
+  Foundry gateway passes to the container (x-client-*). Token B never goes into the request body.
+-->
+	<authentication-managed-identity resource="https://ai.azure.com" client-id="{{chat-mi-client-id}}" />
+	<set-header name="x-ms-user-identity" exists-action="override">
+		<value>@((string)context.Variables["delegatedIdentity"])</value>
+	</set-header>
+	<set-header name="x-client-mcp-token" exists-action="override">
+		<value>@((string)context.Variables["mcpToken"])</value>
+	</set-header>
+</fragment>

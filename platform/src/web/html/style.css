@@ -1,0 +1,18 @@
+:root { font-family: system-ui, sans-serif; color: #1b1b1f; background: #f4f6fb; }
+body { margin: 0; }
+header { display: flex; justify-content: space-between; align-items: center; padding: .75rem 1.25rem; background: #0f3d91; color: #fff; }
+header h1 { font-size: 1.2rem; margin: 0; }
+#user-box { display: flex; gap: .75rem; align-items: center; }
+button { border: 0; border-radius: 6px; padding: .5rem .9rem; background: #2f6fed; color: #fff; cursor: pointer; }
+header button { background: #fff; color: #0f3d91; }
+main { max-width: 820px; margin: 1rem auto; padding: 0 1rem; }
+#chat { display: flex; flex-direction: column; gap: .6rem; min-height: 50vh; }
+.msg { padding: .6rem .9rem; border-radius: 10px; max-width: 80%; white-space: pre-wrap; line-height: 1.4; }
+.user { align-self: flex-end; background: #2f6fed; color: #fff; }
+.agent { align-self: flex-start; background: #fff; border: 1px solid #dde3ef; }
+.error { align-self: center; background: #fde8e8; color: #9b1c1c; }
+.tools { font-size: .8rem; color: #555; margin-top: .35rem; }
+#composer { display: flex; gap: .5rem; margin-top: 1rem; }
+#composer input { flex: 1; padding: .6rem; border-radius: 6px; border: 1px solid #c5cbe0; }
+#debug { margin-top: 1rem; font-size: .8rem; }
+#debug pre { background: #fff; padding: .75rem; border-radius: 6px; overflow: auto; }

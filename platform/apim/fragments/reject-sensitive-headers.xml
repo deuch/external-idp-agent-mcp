@@ -1,0 +1,20 @@
+<fragment>
+	<!--
+  Identity-related headers are computed by the gateway only. A client that tries to set them is
+  rejected (fail closed) instead of silently overridden, so that attempts are visible in the logs.
+-->
+	<choose>
+		<when condition="@(context.Request.Headers.Keys.Any(k => k.StartsWith("x-client-", StringComparison.OrdinalIgnoreCase) || k.StartsWith("x-agent-", StringComparison.OrdinalIgnoreCase) || k.Equals("x-ms-user-identity", StringComparison.OrdinalIgnoreCase)))">
+			<return-response>
+				<set-status code="400" reason="Bad Request" />
+				<set-header name="Content-Type" exists-action="override">
+					<value>application/json</value>
+				</set-header>
+				<set-header name="Access-Control-Allow-Origin" exists-action="override">
+					<value>{{web-origin}}</value>
+				</set-header>
+				<set-body>{"error":"forbidden_header","message":"Identity headers cannot be set by the client."}</set-body>
+			</return-response>
+		</when>
+	</choose>
+</fragment>

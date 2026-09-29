@@ -1,0 +1,29 @@
+# Rendered at container start by the nginx image (envsubst on /etc/nginx/templates/*.template):
+# only the variables below, defined in the Container App, are substituted.
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    server_tokens off;
+
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data:; connect-src 'self' ${IDP_ORIGIN} ${API_ORIGIN}; frame-src ${IDP_ORIGIN}; frame-ancestors 'none'; base-uri 'none'; form-action ${IDP_ORIGIN}" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Cache-Control "no-store" always;
+
+    # Public (non-secret) runtime configuration of the client.
+    location = /config.json {
+        default_type application/json;
+        return 200 '{"authority":"${OIDC_AUTHORITY}","clientId":"${APP_CLIENT_ID}","apiBaseUrl":"${CHAT_API_URL}"}';
+    }
+
+    location = /health {
+        default_type text/plain;
+        return 200 'ok';
+    }
+
+    location / {
+        try_files $uri /index.html;
+    }
+}

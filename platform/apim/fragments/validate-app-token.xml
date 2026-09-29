@@ -1,0 +1,39 @@
+<fragment>
+	<!--
+  Validates the access token A issued by myID (Keycloak) to the mobile / web app:
+  signature (JWKS of the realm), issuer, audience = BFF, azp = app client, expiration.
+  Outputs: appJwt (Jwt), appToken (raw token), userSub, delegatedIdentity.
+-->
+	<validate-jwt header-name="Authorization" require-scheme="Bearer" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized" require-expiration-time="true" require-signed-tokens="true" output-token-variable-name="appJwt">
+		<openid-config url="{{oidc-config-url}}" />
+		<audiences>
+			<audience>{{app-audience}}</audience>
+		</audiences>
+		<issuers>
+			<issuer>{{oidc-issuer}}</issuer>
+		</issuers>
+		<required-claims>
+			<claim name="azp" match="all">
+				<value>{{app-client-id}}</value>
+			</claim>
+		</required-claims>
+	</validate-jwt>
+	<set-variable name="userSub" value="@(((Jwt)context.Variables["appJwt"]).Subject ?? "")" />
+	<choose>
+		<when condition="@(string.IsNullOrEmpty((string)context.Variables["userSub"]))">
+			<return-response>
+				<set-status code="401" reason="Unauthorized" />
+				<set-header name="Access-Control-Allow-Origin" exists-action="override">
+					<value>{{web-origin}}</value>
+				</set-header>
+			</return-response>
+		</when>
+	</choose>
+	<set-variable name="appToken" value="@(context.Request.Headers.GetValueOrDefault("Authorization", "").Substring(7).Trim())" />
+	<!-- Same derivation as the former code BFF: stable, opaque, unique per issuer. -->
+	<set-variable name="delegatedIdentity" value="@{
+		var jwt = (Jwt)context.Variables["appJwt"];
+		var hash = System.Security.Cryptography.SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(jwt.Issuer + "|" + jwt.Subject));
+		return "oidc:" + BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+	}" />
+</fragment>

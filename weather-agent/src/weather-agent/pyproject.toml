@@ -1,0 +1,13 @@
+[project]
+name = "weather-agent"
+version = "0.1.0"
+description = "Foundry hosted agent propagating the end-user Keycloak (myID) token to an MCP server."
+requires-python = ">=3.13"
+dependencies = [
+    "agent-framework-foundry",
+    "agent-framework-foundry-hosting>=1.0.0b260813",
+    "pyjwt[crypto]>=2.10",
+    "python-dotenv",
+    "debugpy",
+]
+

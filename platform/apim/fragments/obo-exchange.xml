@@ -1,0 +1,87 @@
+<fragment>
+	<!--
+  On-Behalf-Of token exchange (RFC 8693, Keycloak Standard Token Exchange):
+  A (aud=weather-bff) -> B (aud=weather-mcp, azp=weather-bff, same sub), with the credentials of the
+  confidential client weather-bff (secret read from Key Vault). B is cached until shortly before it
+  expires, keyed by a hash of A, and validated on every request (even when it comes from the cache).
+  Output: mcpToken (raw token B).
+-->
+	<set-variable name="oboCacheKey" value="@{
+		var hash = System.Security.Cryptography.SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes((string)context.Variables["appToken"]));
+		return "obo-" + BitConverter.ToString(hash).Replace("-", "");
+	}" />
+	<cache-lookup-value key="@((string)context.Variables["oboCacheKey"])" variable-name="mcpToken" caching-type="internal" />
+	<choose>
+		<when condition="@(!context.Variables.ContainsKey("mcpToken"))">
+			<send-request mode="new" response-variable-name="oboResponse" timeout="15" ignore-error="true">
+				<set-url>{{oidc-token-endpoint}}</set-url>
+				<set-method>POST</set-method>
+				<set-header name="Content-Type" exists-action="override">
+					<value>application/x-www-form-urlencoded</value>
+				</set-header>
+				<set-body>@{
+					return "grant_type=" + Uri.EscapeDataString("urn:ietf:params:oauth:grant-type:token-exchange")
+						+ "\u0026subject_token=" + Uri.EscapeDataString((string)context.Variables["appToken"])
+						+ "\u0026subject_token_type=" + Uri.EscapeDataString("urn:ietf:params:oauth:token-type:access_token")
+						+ "\u0026requested_token_type=" + Uri.EscapeDataString("urn:ietf:params:oauth:token-type:access_token")
+						+ "\u0026audience=" + Uri.EscapeDataString("{{mcp-audience}}")
+						+ "\u0026scope=" + Uri.EscapeDataString("{{mcp-scopes}}")
+						+ "\u0026client_id=" + Uri.EscapeDataString("{{bff-client-id}}")
+						+ "\u0026client_secret=" + Uri.EscapeDataString("{{bff-client-secret}}");
+				}</set-body>
+			</send-request>
+			<choose>
+				<when condition="@(context.Variables["oboResponse"] == null || ((IResponse)context.Variables["oboResponse"]).StatusCode != 200)">
+					<!-- Generic error: the IdP response is never returned to the client. -->
+					<return-response>
+						<set-status code="502" reason="Bad Gateway" />
+						<set-header name="Content-Type" exists-action="override">
+							<value>application/json</value>
+						</set-header>
+						<set-header name="Access-Control-Allow-Origin" exists-action="override">
+							<value>{{web-origin}}</value>
+						</set-header>
+						<set-body>{"error":"token_exchange_failed"}</set-body>
+					</return-response>
+				</when>
+			</choose>
+			<set-variable name="oboPayload" value="@(((IResponse)context.Variables["oboResponse"]).Body.As<JObject>())" />
+			<set-variable name="mcpToken" value="@((string)((JObject)context.Variables["oboPayload"])["access_token"])" />
+			<cache-store-value key="@((string)context.Variables["oboCacheKey"])" value="@((string)context.Variables["mcpToken"])" duration="@(Math.Max(30, (int)((JObject)context.Variables["oboPayload"])["expires_in"] - 60))" caching-type="internal" />
+		</when>
+	</choose>
+	<!-- Defense in depth: B must target the MCP server, be issued to the BFF and belong to the same user. -->
+	<validate-jwt token-value="@((string)context.Variables["mcpToken"])" failed-validation-httpcode="502" failed-validation-error-message="Invalid exchanged token" require-expiration-time="true" require-signed-tokens="true" output-token-variable-name="mcpJwt">
+		<openid-config url="{{oidc-config-url}}" />
+		<audiences>
+			<audience>{{mcp-audience}}</audience>
+		</audiences>
+		<issuers>
+			<issuer>{{oidc-issuer}}</issuer>
+		</issuers>
+		<required-claims>
+			<claim name="azp" match="all">
+				<value>{{bff-client-id}}</value>
+			</claim>
+		</required-claims>
+	</validate-jwt>
+	<choose>
+		<when condition="@{
+			var a = (Jwt)context.Variables["appJwt"];
+			var b = (Jwt)context.Variables["mcpJwt"];
+			var scopes = b.Claims.GetValueOrDefault("scope", "").Split(' ');
+			return b.Subject != a.Subject || !scopes.Contains("{{mcp-required-scope}}");
+		}">
+			<return-response>
+				<set-status code="403" reason="Forbidden" />
+				<set-header name="Content-Type" exists-action="override">
+					<value>application/json</value>
+				</set-header>
+				<set-header name="Access-Control-Allow-Origin" exists-action="override">
+					<value>{{web-origin}}</value>
+				</set-header>
+				<set-body>{"error":"insufficient_scope","message":"The user is not allowed to use the weather service."}</set-body>
+			</return-response>
+		</when>
+	</choose>
+</fragment>

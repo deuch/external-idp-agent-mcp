@@ -1,0 +1,35 @@
+<policies>
+	<!--
+  API "chat" (the BFF). Applies to every operation:
+  CORS (web app origin only) -> per-IP limit -> identity headers rejected -> token A validated -> per-user limit.
+-->
+	<inbound>
+		<cors allow-credentials="false" terminate-unmatched-request="true">
+			<allowed-origins>
+				<origin>{{web-origin}}</origin>
+			</allowed-origins>
+			<allowed-methods preflight-result-max-age="600">
+				<method>GET</method>
+				<method>POST</method>
+			</allowed-methods>
+			<allowed-headers>
+				<header>Authorization</header>
+				<header>Content-Type</header>
+			</allowed-headers>
+		</cors>
+		<base />
+		<rate-limit-by-key calls="120" renewal-period="60" counter-key="@("ip-" + context.Request.IpAddress)" />
+		<include-fragment fragment-id="reject-sensitive-headers" />
+		<include-fragment fragment-id="validate-app-token" />
+		<rate-limit-by-key calls="30" renewal-period="60" counter-key="@("sub-" + (string)context.Variables["userSub"])" />
+	</inbound>
+	<backend>
+		<base />
+	</backend>
+	<outbound>
+		<base />
+	</outbound>
+	<on-error>
+		<base />
+	</on-error>
+</policies>

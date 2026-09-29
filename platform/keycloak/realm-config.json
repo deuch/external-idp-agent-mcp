@@ -1,0 +1,107 @@
+{
+  "$comment": "Declarative realm configuration applied by configure_realm.py (idempotent). ${VAR} placeholders are resolved from environment variables; secrets are never stored here.",
+  "realm": {
+    "realm": "weather",
+    "displayName": "myID (Keycloak - POC)",
+    "enabled": true,
+    "sslRequired": "external",
+    "registrationAllowed": false,
+    "loginWithEmailAllowed": true,
+    "resetPasswordAllowed": false,
+    "bruteForceProtected": true,
+    "accessTokenLifespan": 300,
+    "ssoSessionIdleTimeout": 1800,
+    "ssoSessionMaxLifespan": 36000,
+    "revokeRefreshToken": true,
+    "refreshTokenMaxReuse": 0
+  },
+  "roles": [
+    { "name": "weather-basic", "description": "Read the weather" },
+    { "name": "weather-premium", "description": "Manage favorite cities" }
+  ],
+  "clients": [
+    {
+      "clientId": "weather-mcp",
+      "name": "Weather MCP API (resource / audience only)",
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false
+    },
+    {
+      "clientId": "weather-bff",
+      "name": "Weather BFF - API Management (confidential, performs the OBO token exchange)",
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${BFF_CLIENT_SECRET}",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "attributes": { "standard.token.exchange.enabled": "true" }
+    },
+    {
+      "clientId": "weather-mobile",
+      "name": "Weather mobile / web app (public client, PKCE)",
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["${WEB_URL}/*"],
+      "webOrigins": ["${WEB_URL}"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${WEB_URL}/*"
+      }
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "weather-bff-audience",
+      "description": "Adds weather-bff to the aud of tokens issued to the app",
+      "includeInTokenScope": false,
+      "audience": "weather-bff",
+      "defaultFor": ["weather-mobile"]
+    },
+    {
+      "name": "weather:read",
+      "description": "Read the weather (MCP)",
+      "includeInTokenScope": true,
+      "audience": "weather-mcp",
+      "optionalFor": ["weather-bff"]
+    },
+    {
+      "name": "favorites:write",
+      "description": "Manage favorite cities (MCP) - only for weather-premium users",
+      "includeInTokenScope": true,
+      "audience": "weather-mcp",
+      "requiredRealmRoles": ["weather-premium"],
+      "optionalFor": ["weather-bff"]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Martin",
+      "password": "${ALICE_PASSWORD}",
+      "realmRoles": ["weather-basic", "weather-premium"]
+    },
+    {
+      "username": "bob",
+      "email": "bob@example.com",
+      "firstName": "Bob",
+      "lastName": "Durand",
+      "password": "${BOB_PASSWORD}",
+      "realmRoles": ["weather-basic"]
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+<policies>
+	<!--
+  POST /chat/responses : chat message to the hosted agent (Responses API format).
+  The body is rebuilt from an allow-list (input, previous_response_id): the client can never send tools,
+  instructions, model or any other Responses API field. The hosted-agent session (sandbox) is NOT chosen by
+  the client: Foundry does not fence delegated users from each other at session level, so the gateway derives
+  one session per user from the validated identity and rejects any client-supplied agent_session_id.
+-->
+	<inbound>
+		<base />
+		<set-variable name="chatBody" value="@{
+			try {
+				var body = context.Request.Body.As<JObject>(preserveContent: true);
+				if (body == null || body["agent_session_id"] != null) { return ""; }
+				var input = body["input"];
+				if (input == null || input.Type != JTokenType.String) { return ""; }
+				var text = ((string)input).Trim();
+				if (text.Length == 0 || text.Length > 4000) { return ""; }
+				var result = new JObject(new JProperty("input", text));
+				var previous = body["previous_response_id"];
+				if (previous != null && previous.Type != JTokenType.Null) {
+					if (previous.Type != JTokenType.String || !Regex.IsMatch((string)previous, "^[A-Za-z0-9_-]{1,200}$")) { return ""; }
+					result["previous_response_id"] = (string)previous;
+				}
+				var sessionHash = System.Security.Cryptography.SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes("session|" + (string)context.Variables["delegatedIdentity"]));
+				result["agent_session_id"] = BitConverter.ToString(sessionHash).Replace("-", "").ToLowerInvariant();
+				return result.ToString(Newtonsoft.Json.Formatting.None);
+			} catch {
+				return "";
+			}
+		}" />
+		<choose>
+			<when condition="@(string.IsNullOrEmpty((string)context.Variables["chatBody"]))">
+				<return-response>
+					<set-status code="400" reason="Bad Request" />
+					<set-header name="Content-Type" exists-action="override">
+						<value>application/json</value>
+					</set-header>
+					<set-header name="Access-Control-Allow-Origin" exists-action="override">
+						<value>{{web-origin}}</value>
+					</set-header>
+					<set-body>{"error":"invalid_request","message":"Expected {\"input\": string (1-4000 chars), \"previous_response_id\"?}. The session is managed by the gateway."}</set-body>
+				</return-response>
+			</when>
+		</choose>
+		<include-fragment fragment-id="obo-exchange" />
+		<include-fragment fragment-id="foundry-delegation" />
+		<set-header name="Content-Type" exists-action="override">
+			<value>application/json</value>
+		</set-header>
+		<set-body>@((string)context.Variables["chatBody"])</set-body>
+		<rewrite-uri template="/responses?api-version=v1" copy-unmatched-params="false" />
+	</inbound>
+	<backend>
+		<forward-request timeout="180" />
+	</backend>
+	<outbound>
+		<base />
+	</outbound>
+	<on-error>
+		<base />
+	</on-error>
+</policies>

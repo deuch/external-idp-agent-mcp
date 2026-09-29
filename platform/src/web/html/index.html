@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Météo – POC identité de bout en bout</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>☀️ Chat météo</h1>
+    <div id="user-box">
+      <span id="user-name"></span>
+      <button id="login" hidden>Se connecter</button>
+      <button id="logout" hidden>Se déconnecter</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="chat" aria-live="polite"></section>
+    <form id="composer" hidden>
+      <input id="message" autocomplete="off" placeholder="Quel temps fait-il à Lyon ?" maxlength="4000" required />
+      <button type="submit">Envoyer</button>
+    </form>
+    <details id="debug">
+      <summary>Détails identité / jetons</summary>
+      <pre id="debug-content"></pre>
+    </details>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/oidc-client-ts@3/dist/browser/oidc-client-ts.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

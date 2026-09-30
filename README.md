@@ -67,31 +67,89 @@ deploy.ps1 / teardown.ps1         déploiement / suppression d'un environnement 
 
 ## Déployer
 
-Prérequis : `az` et `azd` connectés au même compte et au même tenant, droits **Owner** sur la souscription (rôle custom et role assignments), Python 3.13 avec `.venv-dev` (voir « Tester localement »).
+Le déploiement se fait **entièrement dans Azure** : les images sont construites à distance (ACR Tasks), **Docker n'est pas nécessaire**. Côté poste, il suffit des outils ci-dessous et d'un environnement Python minimal (un seul paquet).
 
-1. Copiez `platform/.env.example` en `platform/.env`. Choisissez le nom de l'environnement (`AZD_ENVIRONMENT`), la région et le resource group (`AZURE_RESOURCE_GROUP`).
-   - **Resource group existant** : il est réutilisé tel quel, avec sa région. **Ses tags ne sont jamais modifiés** : [weather-agent/infra/main.bicep](weather-agent/infra/main.bicep) ne crée le groupe que s'il n'existe pas, et `deploy.ps1` vérifie les tags après chaque étape.
-   - Sinon, le resource group est créé.
-2. Lancez :
-   ```powershell
-   ./deploy.ps1
-   ```
-   Le script enchaîne 8 étapes :
-   1. création de l'environnement azd ;
-   2. `azd provision` (projet Foundry et modèle) ;
-   3. registre, environnement Container Apps, Key Vault, identités, App Insights et service API Management ;
-   4. génération des secrets dans le Key Vault et build distant des images ;
-   5. PostgreSQL, Keycloak, MCP, application web et configuration APIM (API « chat ») ;
-   6. configuration du realm ;
-   7. `azd deploy` de l'agent ;
-   8. test de bout en bout et de sécurité (usurpation d'en-têtes, jeton falsifié, corps en liste blanche, accès croisé entre utilisateurs, CORS, limitation de débit).
-3. Ouvrez l'URL de l'application web affichée, connectez-vous avec `alice` ou `bob` (mots de passe dans le Key Vault : `alice-password`, `bob-password`) et posez une question : « Quel temps fait-il à Lyon ? », « Qui suis-je pour le serveur MCP ? ».
+> ℹ️ Les commandes de la section [Tester localement](#tester-localement-sans-conteneur-ni-keycloak) (serveur MCP, agent, faux IdP) ne sont **pas** nécessaires pour déployer.
 
-Le script est **idempotent** : relancez-le pour appliquer une modification. Il réutilise les secrets du Key Vault. `-SkipImages -SkipTests` permet une mise à jour de configuration seule.
+### 1. Prérequis
 
-Sauvegardes produites dans `backups/<environnement>/` (aucun secret) :
-- `deployment.json` : URLs, noms des ressources, images ;
-- `realm-export-*.json` : export du realm, secrets masqués par Keycloak.
+| Outil | Version | Pourquoi |
+|---|---|---|
+| **PowerShell** | **7.x** (`pwsh`) | `deploy.ps1` et `teardown.ps1`. Windows PowerShell 5.1 n'est **pas** supporté |
+| **Azure CLI** (`az`) | 2.60+ (avec Bicep : `az bicep install`) | Déploiement Bicep, Key Vault, ACR Tasks |
+| **Azure Developer CLI** (`azd`) | 1.27.1+ | Projet Foundry, modèle et agent hébergé |
+| Extensions azd | `azure.ai.agents`, `azure.ai.projects`, `microsoft.foundry` | Hosted agents Foundry |
+| **Python** | 3.11+ | Configuration du realm Keycloak et test de bout en bout (paquet `httpx`) |
+| **Git** | — | Cloner le dépôt |
+
+**Droits Azure** : rôle **Owner** (ou *Contributor* + *User Access Administrator*) sur la souscription ou sur le resource group cible. Le déploiement crée un rôle personnalisé et des role assignments.
+
+**Région** : une région qui propose à la fois les **hosted agents Foundry**, le modèle `gpt-5.4-mini` (GlobalStandard) et **API Management v2**. Le POC est validé en **France Central**.
+
+### 2. Préparer le poste (une seule fois)
+
+```powershell
+# Extensions azd
+azd extension install azure.ai.agents
+azd extension install azure.ai.projects
+azd extension install microsoft.foundry
+
+# Connexion : même compte et même tenant pour az et azd
+az login --tenant <tenant-id>
+az account set --subscription <subscription-id>
+azd auth login --tenant-id <tenant-id>
+
+# Environnement Python minimal, à la racine du dépôt
+# (deploy.ps1 utilise .venv-dev s'il existe, sinon le `python` du PATH)
+python -m venv .venv-dev
+.\.venv-dev\Scripts\python -m pip install --upgrade pip httpx
+```
+
+### 3. Configurer
+
+```powershell
+Copy-Item platform\.env.example platform\.env
+```
+
+Dans `platform/.env`, renseignez le nom de l'environnement (`AZD_ENVIRONMENT`), la région (`AZURE_LOCATION`) et le resource group (`AZURE_RESOURCE_GROUP`). Ce fichier ne contient **aucun secret** : ils sont générés par le script et stockés uniquement dans le Key Vault.
+- **Resource group existant** : il est réutilisé tel quel, avec sa région. **Ses tags ne sont jamais modifiés** : [weather-agent/infra/main.bicep](weather-agent/infra/main.bicep) ne crée le groupe que s'il n'existe pas, et `deploy.ps1` vérifie les tags après chaque étape.
+- Sinon, le resource group est créé.
+
+### 4. Déployer
+
+```powershell
+pwsh ./deploy.ps1
+```
+
+Durée : environ **30 à 45 minutes** pour un premier déploiement (API Management et PostgreSQL sont les plus longs). Le script enchaîne :
+1. création de l'environnement azd ;
+2. `azd provision` (projet Foundry et modèle) ;
+3. registre, environnement Container Apps, Key Vault, identités, App Insights et service API Management ;
+4. génération des secrets dans le Key Vault et build distant des images ;
+5. PostgreSQL, Keycloak, MCP et application web ;
+6. configuration du realm Keycloak, puis de l'API « chat » d'APIM (les policies ont besoin du realm) ;
+7. `azd deploy` de l'agent ;
+8. test de bout en bout et de sécurité (usurpation d'en-têtes, jeton falsifié, corps en liste blanche, accès croisé entre utilisateurs, CORS, limitation de débit).
+
+### 5. Utiliser
+
+Ouvrez l'URL de l'application web affichée à la fin du script. Connectez-vous avec `alice` (premium) ou `bob` (basic) et posez une question : « Quel temps fait-il à Lyon ? », « Qui suis-je pour le serveur MCP ? ».
+
+Les mots de passe sont dans le Key Vault :
+
+```powershell
+az keyvault secret show --vault-name <key-vault> --name alice-password --query value -o tsv
+```
+
+### Mettre à jour, dépanner
+
+- Le script est **idempotent** : relancez-le pour appliquer une modification. Il réutilise les secrets du Key Vault.
+  - `-SkipImages -SkipTests` : mise à jour de configuration seule.
+  - `-SkipImages` : reprise après une erreur, quand les images sont déjà construites.
+- Erreur `TokenCreatedWithOutdatedPolicies` ou `InteractionRequired` : reconnectez-vous (`az logout`, `az login --tenant <tenant-id>`, puis `azd auth login --tenant-id <tenant-id>`) et relancez le script.
+- Sauvegardes produites dans `backups/<environnement>/` (aucun secret, dossier ignoré par git) :
+  - `deployment.json` : URLs, noms des ressources, images ;
+  - `realm-export-*.json` : export du realm, secrets masqués par Keycloak.
 
 ## Supprimer un environnement
 
@@ -103,6 +161,8 @@ Sauvegardes produites dans `backups/<environnement>/` (aucun secret) :
 Si le resource group existait avant le déploiement, `teardown.ps1` supprime les ressources mais **conserve le groupe et ses tags**. Sinon, il supprime le resource group.
 
 ## Tester localement (sans conteneur ni Keycloak)
+
+> **Optionnel**, pour développer ou déboguer l'agent et le serveur MCP sur votre poste. Ce n'est **pas** nécessaire pour déployer.
 
 ```powershell
 python -m venv .venv-dev; .\.venv-dev\Scripts\pip install -r platform\src\mcp-weather\requirements.txt starlette

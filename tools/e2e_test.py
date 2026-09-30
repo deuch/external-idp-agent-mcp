@@ -1,10 +1,10 @@
-"""End-to-end and security test of the deployed stack: Keycloak (myID) -> APIM chat API (BFF, OBO)
--> Foundry hosted agent -> MCP server.
+"""End-to-end and security test of the deployed stack: Keycloak (myID) -> BFF (APIM policies or Python
+service, OBO token exchange) -> Foundry hosted agent -> MCP server. The same tests run for both BFF modes.
 
 Uses the password grant on weather-mobile (enabled only for the duration of the test by deploy.ps1)
-to obtain user tokens, then exercises the chain through API Management.
+to obtain user tokens, then exercises the chain through the BFF.
 
-Environment: KC_ISSUER, API_URL (APIM chat API), WEB_URL, MCP_URL, ALICE_PASSWORD, BOB_PASSWORD
+Environment: KC_ISSUER, API_URL (BFF chat API), WEB_URL, MCP_URL, ALICE_PASSWORD, BOB_PASSWORD
 """
 
 import base64
@@ -92,8 +92,8 @@ check("public client cannot exchange tokens", r.status_code >= 400, str(r.status
 r = httpx.get(f"{API}/me", headers={"Authorization": f"Bearer {alice}"}, timeout=30)
 expected_identity = "oidc:" + hashlib.sha256(f"{ca['iss']}|{ca['sub']}".encode()).hexdigest()
 me = r.json() if r.status_code == 200 else {}
-check("APIM validates token A (/me)", r.status_code == 200 and me.get("sub") == ca["sub"], str(r.status_code))
-check("APIM derives the delegated identity like the former BFF", me.get("delegated_identity") == expected_identity)
+check("BFF validates token A (/me)", r.status_code == 200 and me.get("sub") == ca["sub"], str(r.status_code))
+check("BFF derives the delegated identity oidc:sha256(iss|sub)", me.get("delegated_identity") == expected_identity)
 
 r = httpx.get(f"{API}/me", timeout=30)
 check("no token -> 401", r.status_code == 401, str(r.status_code))
@@ -127,7 +127,7 @@ for label, body in [
 # ---------------------------------------------------------------- functional chain (Alice, premium)
 r = post(alice, {"input": "Qui suis-je pour le serveur MCP ? Donne le sub et la liste exacte des scopes."})
 text, tools = summarize(r)
-check("alice: chat via APIM -> agent -> MCP", r.status_code == 200, f"{r.status_code} {short(r.text) if r.status_code != 200 else ''}")
+check("alice: chat via BFF -> agent -> MCP", r.status_code == 200, f"{r.status_code} {short(r.text) if r.status_code != 200 else ''}")
 check("alice: MCP sees her Keycloak sub", ca["sub"] in text, short(text))
 alice_response_id = r.json().get("id") if r.status_code == 200 else None
 alice_session_id = r.json().get("agent_session_id") if r.status_code == 200 else None

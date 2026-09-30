@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.35
+httpx>=0.28
+pyjwt[crypto]>=2.10
+azure-identity>=1.23

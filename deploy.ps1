@@ -1,10 +1,13 @@
 <#
 .SYNOPSIS
   Deploys the whole POC into one resource group (one azd environment):
-    1. azd environment (created if missing)            5. PostgreSQL + Keycloak + MCP + web app + APIM config
-    2. Foundry project + model (azd provision)         6. Keycloak realm (platform/keycloak/realm-config.json)
-    3. Registry, Key Vault, identities, APIM (base)     7. Hosted agent (azd deploy)
+    1. azd environment (created if missing)            5. PostgreSQL + Keycloak + MCP + web app (+ Python BFF)
+    2. Foundry project + model (azd provision)         6. Keycloak realm (+ APIM chat API in apim mode)
+    3. Registry, Key Vault, identities (+ APIM)         7. Hosted agent (azd deploy)
     4. Secrets (Key Vault) + images (ACR remote builds) 8. End-to-end test
+
+  BFF_MODE (platform/.env) selects the BFF: 'apim' (API Management policies, default) or 'code' (Python
+  service). One mode per environment: the script refuses to switch the mode of an existing environment.
   No local Docker required. Idempotent: re-running reuses the secrets stored in Key Vault.
 
 .EXAMPLE
@@ -81,10 +84,12 @@ $location = if ($cfg.AZURE_LOCATION) { $cfg.AZURE_LOCATION } else { 'francecentr
 $rg = if ($cfg.AZURE_RESOURCE_GROUP) { $cfg.AZURE_RESOURCE_GROUP } else { "rg-$envName" }
 $projectName = if ($cfg.AZURE_AI_PROJECT_NAME) { $cfg.AZURE_AI_PROJECT_NAME } else { "ai-project-$envName" }
 $kcVersion = if ($cfg.KEYCLOAK_VERSION) { $cfg.KEYCLOAK_VERSION } else { '26.7.4' }
+$bffMode = if ($cfg.BFF_MODE) { $cfg.BFF_MODE.ToLower() } else { 'apim' }
+if ($bffMode -notin 'apim', 'code') { throw "BFF_MODE must be 'apim' or 'code' (got '$bffMode')" }
 $backupDir = Join-Path $root "backups/$envName"
 New-Item -ItemType Directory -Force $backupDir | Out-Null
 
-Write-Host "==> 1/8 azd environment '$envName' (resource group $rg)" -ForegroundColor Cyan
+Write-Host "==> 1/8 azd environment '$envName' (resource group $rg, BFF_MODE=$bffMode)" -ForegroundColor Cyan
 # An existing resource group is reused as is: its location wins and its tags are never modified
 # (weather-agent/infra/main.bicep only creates the group when it does not exist).
 $useExistingRg = (Invoke-Az group exists -n $rg --subscription $subscription) -eq 'true'
@@ -111,12 +116,19 @@ $existing = (azd env list --output json | ConvertFrom-Json).Name
 Pop-Location
 if ($existing -notcontains $envName) {
     Invoke-Azd env new $envName --subscription $subscription --location $location --no-prompt | Out-Null
+} else {
+    # One mode per environment: switching would leave the other mode's identity with the impersonation role.
+    $recordedMode = (Get-AzdValues $envName).BFF_MODE
+    if (-not $recordedMode) { $recordedMode = 'apim' }  # environments created before BFF_MODE existed
+    if ($recordedMode -ne $bffMode) {
+        throw "Environment '$envName' was deployed with BFF_MODE=$recordedMode. Use another AZD_ENVIRONMENT / resource group for BFF_MODE=$bffMode, or run teardown.ps1 first."
+    }
 }
 $settings = [ordered]@{
     AZURE_SUBSCRIPTION_ID = $subscription; AZURE_LOCATION = $location; AZURE_RESOURCE_GROUP = $rg
     AZURE_USE_EXISTING_RESOURCE_GROUP = $useExistingRg.ToString().ToLower()
     AZURE_AI_PROJECT_NAME = $projectName; AZURE_AI_MODEL_DEPLOYMENT_NAME = 'gpt-5.4-mini'
-    USE_EXISTING_AI_PROJECT = 'false'; AZD_AGENT_SKIP_ACR = 'true'; MCP_AUDIENCE = 'weather-mcp'
+    USE_EXISTING_AI_PROJECT = 'false'; AZD_AGENT_SKIP_ACR = 'true'; MCP_AUDIENCE = 'weather-mcp'; BFF_MODE = $bffMode
 }
 foreach ($k in $settings.Keys) { Invoke-Azd env set $k $settings[$k] -e $envName | Out-Null }
 
@@ -127,10 +139,11 @@ $azd = Get-AzdValues $envName
 $deployer = Invoke-Az ad signed-in-user show --query id -o tsv
 $common = @(
     "deployerObjectId=$deployer", "foundryAccountName=$($azd.AZURE_AI_ACCOUNT_NAME)",
-    "foundryProjectName=$($azd.AZURE_AI_PROJECT_NAME)", "foundryProjectEndpoint=$($azd.FOUNDRY_PROJECT_ENDPOINT)"
+    "foundryProjectName=$($azd.AZURE_AI_PROJECT_NAME)", "foundryProjectEndpoint=$($azd.FOUNDRY_PROJECT_ENDPOINT)",
+    "bffMode=$bffMode"
 )
 
-Write-Host "==> 3/8 Registry, Container Apps environment, Key Vault, identities, API Management" -ForegroundColor Cyan
+Write-Host "==> 3/8 Registry, Container Apps environment, Key Vault, identities$(if ($bffMode -eq 'apim') { ', API Management' })" -ForegroundColor Cyan
 $base = Invoke-Az deployment group create -g $rg -n platform-base -f $template --parameters stage=base @common --query properties.outputs -o json | ConvertFrom-Json
 $vault = $base.keyVaultName.value
 $registry = $base.registryName.value
@@ -146,17 +159,24 @@ if (-not $SkipImages) {
     Invoke-Az acr build -r $registry -t "keycloak:$tag" --build-arg "KC_VERSION=$kcVersion" "$root/platform/keycloak" --no-logs -o none | Out-Null
     Invoke-Az acr build -r $registry -t "mcp-weather:$tag" "$root/platform/src/mcp-weather" --no-logs -o none | Out-Null
     Invoke-Az acr build -r $registry -t "web:$tag" "$root/platform/src/web" --no-logs -o none | Out-Null
-    $images = @{ kc = "$registry.azurecr.io/keycloak:$tag"; mcp = "$registry.azurecr.io/mcp-weather:$tag"; web = "$registry.azurecr.io/web:$tag" }
+    $images = @{ kc = "$registry.azurecr.io/keycloak:$tag"; mcp = "$registry.azurecr.io/mcp-weather:$tag"; web = "$registry.azurecr.io/web:$tag"; bff = '' }
+    if ($bffMode -eq 'code') {
+        Invoke-Az acr build -r $registry -t "bff:$tag" "$root/platform/src/bff" --no-logs -o none | Out-Null
+        $images.bff = "$registry.azurecr.io/bff:$tag"
+    }
 } else {
-    $images = @{}
-    foreach ($pair in @(@('kc', 'ca-keycloak'), @('mcp', 'ca-mcp-weather'), @('web', 'ca-web'))) {
+    $images = @{ bff = '' }
+    $apps = @(@('kc', 'ca-keycloak'), @('mcp', 'ca-mcp-weather'), @('web', 'ca-web'))
+    if ($bffMode -eq 'code') { $apps += , @('bff', 'ca-bff') }
+    foreach ($pair in $apps) {
         $images[$pair[0]] = Invoke-Az containerapp show -g $rg -n $pair[1] --query "properties.template.containers[0].image" -o tsv
     }
 }
 
-Write-Host "==> 5/8 PostgreSQL + Keycloak + MCP server + web app" -ForegroundColor Cyan
+Write-Host "==> 5/8 PostgreSQL + Keycloak + MCP server + web app$(if ($bffMode -eq 'code') { ' + Python BFF' })" -ForegroundColor Cyan
 $appParams = @(
-    "keycloakImage=$($images.kc)", "mcpImage=$($images.mcp)", "webImage=$($images.web)", "dbAdminPassword=$($secrets['kc-db-password'])"
+    "keycloakImage=$($images.kc)", "mcpImage=$($images.mcp)", "webImage=$($images.web)", "bffImage=$($images.bff)",
+    "dbAdminPassword=$($secrets['kc-db-password'])"
 )
 $out = Invoke-Az deployment group create -g $rg -n platform-apps -f $template --parameters stage=apps @common @appParams `
     --query properties.outputs -o json | ConvertFrom-Json
@@ -179,9 +199,11 @@ try {
     Remove-Item Env:BFF_CLIENT_SECRET -ErrorAction SilentlyContinue
 }
 
-Write-Host "==> 6b/8 API Management chat API = BFF (policies need the realm OpenID configuration)" -ForegroundColor Cyan
-Invoke-Az deployment group create -g $rg -n platform-gateway -f $template --parameters stage=gateway @common @appParams -o none | Out-Null
-Assert-RgTagsUnchanged 'gateway deployment'
+if ($bffMode -eq 'apim') {
+    Write-Host "==> 6b/8 API Management chat API = BFF (policies need the realm OpenID configuration)" -ForegroundColor Cyan
+    Invoke-Az deployment group create -g $rg -n platform-gateway -f $template --parameters stage=gateway @common @appParams -o none | Out-Null
+    Assert-RgTagsUnchanged 'gateway deployment'
+}
 
 Write-Host "==> 7/8 Hosted agent (azd deploy)" -ForegroundColor Cyan
 Invoke-Azd env set MCP_SERVER_URL $mcpUrl -e $envName | Out-Null
@@ -195,7 +217,7 @@ Assert-RgTagsUnchanged 'azd deploy'
     deployedAt = (Get-Date).ToString('o'); azdEnvironment = $envName; subscription = $subscription; resourceGroup = $rg
     existingResourceGroup = $useExistingRg; resourceGroupTags = $rgTagsBefore
     foundryProjectEndpoint = $azd.FOUNDRY_PROJECT_ENDPOINT; agent = 'weather-agent'; keyVault = $vault; registry = $registry
-    images = $images; keycloakUrl = $kcUrl; issuer = $issuer; mcpServerUrl = $mcpUrl; webUrl = $webUrl; chatApiUrl = $chatApiUrl; apim = $out.apimName.value
+    images = $images; keycloakUrl = $kcUrl; issuer = $issuer; mcpServerUrl = $mcpUrl; webUrl = $webUrl; chatApiUrl = $chatApiUrl; bffMode = $bffMode; apim = $out.apimName.value
 } | ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 (Join-Path $backupDir 'deployment.json')
 
 $testExit = 0
@@ -215,7 +237,7 @@ Remove-Item Env:KC_ADMIN_PASSWORD, Env:ALICE_PASSWORD, Env:BOB_PASSWORD -ErrorAc
 Write-Host ""
 Write-Host "Deployment complete ($envName / $rg)" -ForegroundColor Green
 Write-Host "  Chat (web app)    : $webUrl"
-Write-Host "  BFF (APIM API)   : $chatApiUrl"
+Write-Host "  BFF ($bffMode)$(' ' * (11 - $bffMode.Length)): $chatApiUrl"
 Write-Host "  Keycloak (myID)  : $kcUrl/admin   (user 'admin', password: Key Vault $vault / kc-admin-password)"
 Write-Host "  Issuer           : $issuer"
 Write-Host "  MCP server       : $mcpUrl"

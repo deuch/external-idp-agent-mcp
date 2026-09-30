@@ -1,11 +1,12 @@
 // Platform for the weather chat POC:
-//   Keycloak ("myID") + Azure API Management as the BFF (OBO token exchange in policies)
-//   + static web app + MCP server, on Azure Container Apps.
+//   Keycloak ("myID") + BFF (OBO token exchange) + static web app + MCP server, on Azure Container Apps.
+//   The BFF is either Azure API Management policies (bffMode = 'apim') or a Python service (bffMode = 'code');
+//   both expose the same contract (POST /chat/responses, GET /chat/me) and pass the same tests.
 // The Foundry project and hosted agent are provisioned by azd (weather-agent/).
 //
 // Three stages (see deploy.ps1):
-//   base    : registry, logs, App Insights, Container Apps environment, Key Vault, identities, APIM service
-//   apps    : PostgreSQL, Keycloak, MCP server, web app, Foundry role assignments
+//   base    : registry, logs, App Insights, Container Apps environment, Key Vault, identities, APIM service (apim)
+//   apps    : PostgreSQL, Keycloak, MCP server, web app, Python BFF (code), Foundry role assignments
 //   gateway : apps + APIM configuration. Runs after the Keycloak realm exists, because APIM downloads
 //             the OpenID configuration of the realm when it saves the validate-jwt policies.
 targetScope = 'resourceGroup'
@@ -26,6 +27,11 @@ param agentName string = 'weather-agent'
 param keycloakImage string = ''
 param mcpImage string = ''
 param webImage string = ''
+param bffImage string = ''
+
+@description('BFF implementation: API Management policies (apim) or Python service (code). One mode per environment.')
+@allowed(['apim', 'code'])
+param bffMode string = 'apim'
 
 @secure()
 param dbAdminPassword string = ''
@@ -41,12 +47,15 @@ param mcpAudience string = 'weather-mcp'
 param mcpScopes string = 'weather:read favorites:write'
 
 var suffix = uniqueString(resourceGroup().id)
-var tags = { project: 'external-idp-agent-mcp', stack: 'keycloak-obo-apim' }
+var useApim = bffMode == 'apim'
+var useCode = bffMode == 'code'
+var tags = { project: 'external-idp-agent-mcp', stack: useApim ? 'keycloak-obo-apim' : 'keycloak-obo-code' }
 var deployApps = stage == 'apps' || stage == 'gateway'
 var deployGateway = stage == 'gateway'
 var kcAppName = 'ca-keycloak'
 var mcpAppName = 'ca-mcp-weather'
 var webAppName = 'ca-web'
+var bffAppName = 'ca-bff'
 var dbAdmin = 'kcadmin'
 
 var roles = {
@@ -148,16 +157,43 @@ resource webIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-3
 
 // APIM identities: one to read Key Vault secrets (named values), one DEDICATED to the chat API.
 // Only the chat identity may call the agent and delegate the end-user identity to Foundry.
-resource apimKvIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+resource apimKvIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (useApim) {
   name: 'id-apim-kv-${suffix}'
   location: location
   tags: tags
 }
 
-resource apimChatIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+resource apimChatIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (useApim) {
   name: 'id-apim-chat-${suffix}'
   location: location
   tags: tags
+}
+
+// Python BFF identity (code mode): the ONLY identity allowed to call the agent and delegate the end-user identity.
+resource bffIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (useCode) {
+  name: 'id-bff-${suffix}'
+  location: location
+  tags: tags
+}
+
+resource bffAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (useCode) {
+  scope: registry
+  name: guid(registry.id, bffIdentity.id, roles.acrPull)
+  properties: {
+    principalId: bffIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull)
+  }
+}
+
+resource bffVaultReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (useCode) {
+  scope: vault
+  name: guid(vault.id, bffIdentity.id, roles.keyVaultSecretsUser)
+  properties: {
+    principalId: bffIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.keyVaultSecretsUser)
+  }
 }
 
 resource kcAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -200,18 +236,18 @@ resource kcVaultReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-resource apimVaultReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource apimVaultReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (useApim) {
   scope: vault
   name: guid(vault.id, apimKvIdentity.id, roles.keyVaultSecretsUser)
   properties: {
-    principalId: apimKvIdentity.properties.principalId
+    principalId: apimKvIdentity!.properties.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.keyVaultSecretsUser)
   }
 }
 
 // Public gateway (POC). The service is created in the base stage because it is the slowest resource.
-resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
+resource apim 'Microsoft.ApiManagement/service@2024-05-01' = if (useApim) {
   name: 'apim-wx-${suffix}'
   location: location
   tags: tags
@@ -234,7 +270,12 @@ var issuer = '${kcUrl}/realms/${realm}'
 var jwksUri = '${issuer}/protocol/openid-connect/certs'
 var mcpUrl = 'https://${mcpAppName}.${domain}'
 var webUrl = 'https://${webAppName}.${domain}'
-var chatApiUrl = '${apim.properties.gatewayUrl}/chat'
+var bffUrl = 'https://${bffAppName}.${domain}'
+var chatApiOrigin = useApim ? apim!.properties.gatewayUrl : bffUrl
+var chatApiUrl = '${chatApiOrigin}/chat'
+// Identity that calls the agent and holds the impersonation role: dedicated APIM identity or BFF identity.
+var chatIdentityId = useApim ? apimChatIdentity.id : bffIdentity.id
+var chatPrincipalId = useApim ? apimChatIdentity!.properties.principalId : bffIdentity!.properties.principalId
 
 resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = if (deployApps) {
   name: 'psql-wx-${suffix}'
@@ -372,7 +413,7 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
             { name: 'APP_CLIENT_ID', value: appClientId }
             { name: 'CHAT_API_URL', value: chatApiUrl }
             { name: 'IDP_ORIGIN', value: kcUrl }
-            { name: 'API_ORIGIN', value: apim.properties.gatewayUrl }
+            { name: 'API_ORIGIN', value: chatApiOrigin }
           ]
           probes: [
             { type: 'Liveness', httpGet: { path: '/health', port: 8080 }, periodSeconds: 30 }
@@ -406,9 +447,9 @@ resource impersonationRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' 
 
 resource chatAgentConsumer 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployApps) {
   scope: foundryProject
-  name: guid(foundryProject.id, apimChatIdentity.id, roles.foundryAgentConsumer)
+  name: guid(foundryProject.id, chatIdentityId, roles.foundryAgentConsumer)
   properties: {
-    principalId: apimChatIdentity.properties.principalId
+    principalId: chatPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.foundryAgentConsumer)
   }
@@ -416,23 +457,23 @@ resource chatAgentConsumer 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 
 resource chatImpersonation 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployApps) {
   scope: foundryProject
-  name: guid(foundryProject.id, apimChatIdentity.id, 'user-identity-impersonation')
+  name: guid(foundryProject.id, chatIdentityId, 'user-identity-impersonation')
   properties: {
-    principalId: apimChatIdentity.properties.principalId
+    principalId: chatPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: impersonationRole.id
   }
 }
 
-module apimConfig 'apim-config.bicep' = if (deployGateway) {
+module apimConfig 'apim-config.bicep' = if (deployGateway && useApim) {
   name: 'apim-config'
   dependsOn: [ apimVaultReader, chatAgentConsumer, chatImpersonation ]
   params: {
-    apimName: apim.name
+    apimName: apim!.name
     appInsightsName: appInsights.name
     keyVaultUri: vault.properties.vaultUri
-    kvIdentityClientId: apimKvIdentity.properties.clientId
-    chatIdentityClientId: apimChatIdentity.properties.clientId
+    kvIdentityClientId: apimKvIdentity!.properties.clientId
+    chatIdentityClientId: apimChatIdentity!.properties.clientId
     oidcIssuer: issuer
     appClientId: appClientId
     bffClientId: bffClientId
@@ -443,11 +484,58 @@ module apimConfig 'apim-config.bicep' = if (deployGateway) {
   }
 }
 
+// Python BFF (code mode). Single replica: the in-memory rate limits are exact (use Redis to scale out).
+resource bffApp 'Microsoft.App/containerApps@2024-03-01' = if (deployApps && useCode) {
+  name: bffAppName
+  location: location
+  tags: union(tags, { role: 'bff' })
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${bffIdentity.id}': {} } }
+  dependsOn: [ bffAcrPull, bffVaultReader, chatAgentConsumer, chatImpersonation ]
+  properties: {
+    environmentId: acaEnv.id
+    configuration: {
+      ingress: { external: true, targetPort: 8080, transport: 'auto', allowInsecure: false }
+      registries: [ { server: registry.properties.loginServer, identity: bffIdentity.id } ]
+      secrets: [
+        { name: 'bff-client-secret', keyVaultUrl: '${vault.properties.vaultUri}secrets/weather-bff-client-secret', identity: bffIdentity.id }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'bff'
+          image: bffImage
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: [
+            { name: 'AZURE_CLIENT_ID', value: bffIdentity!.properties.clientId }
+            { name: 'OIDC_ISSUER', value: issuer }
+            { name: 'OIDC_JWKS_URI', value: jwksUri }
+            { name: 'APP_CLIENT_ID', value: appClientId }
+            { name: 'BFF_CLIENT_ID', value: bffClientId }
+            { name: 'BFF_CLIENT_SECRET', secretRef: 'bff-client-secret' }
+            { name: 'MCP_AUDIENCE', value: mcpAudience }
+            { name: 'MCP_SCOPES', value: mcpScopes }
+            { name: 'MCP_TOKEN_HEADER', value: 'x-client-mcp-token' }
+            { name: 'AGENT_ENDPOINT', value: '${foundryProjectEndpoint}/agents/${agentName}/endpoint/protocols/openai' }
+            { name: 'WEB_ORIGIN', value: webUrl }
+          ]
+          probes: [
+            { type: 'Liveness', httpGet: { path: '/health', port: 8080 }, periodSeconds: 30 }
+            { type: 'Readiness', httpGet: { path: '/health', port: 8080 }, periodSeconds: 10 }
+          ]
+        }
+      ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+}
+
+output bffMode string = bffMode
 output registryName string = registry.name
 output registryLoginServer string = registry.properties.loginServer
 output keyVaultName string = vault.name
-output apimName string = apim.name
-output apimGatewayUrl string = apim.properties.gatewayUrl
+output apimName string = useApim ? apim!.name : ''
+output apimGatewayUrl string = useApim ? apim!.properties.gatewayUrl : ''
 output chatApiUrl string = chatApiUrl
 output keycloakUrl string = kcUrl
 output issuer string = issuer

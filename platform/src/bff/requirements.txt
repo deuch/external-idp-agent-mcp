@@ -3,3 +3,4 @@ uvicorn[standard]>=0.35
 httpx>=0.28
 pyjwt[crypto]>=2.10
 azure-identity>=1.23
+aiohttp>=3.11  # transport required by azure.identity.aio (ManagedIdentityCredential)

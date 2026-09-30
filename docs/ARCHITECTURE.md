@@ -2,6 +2,8 @@
 
 Cette page explique comment l'identité d'un utilisateur authentifié par **myID (Keycloak)** est propagée jusqu'au **serveur MCP**, en passant par **Azure API Management** (le BFF) et un **agent hébergé Microsoft Foundry**. Elle décrit aussi comment les jetons sont protégés à chaque étape.
 
+Le BFF existe en **deux implémentations interchangeables** (`BFF_MODE`) : des policies **API Management** (mode `apim`, décrit ci-dessous) ou un **service Python** (mode `code`). Elles respectent le même contrat et passent les mêmes tests : voir [§ 8](#8-deux-implémentations-du-bff-bff_mode).
+
 > Version détaillée (principes, menaces, limites) : [Authentification-principes.docx](Authentification-principes.docx). Configuration de l'IdP : [KEYCLOAK.md](KEYCLOAK.md).
 
 ## 1. Le problème à résoudre
@@ -134,9 +136,9 @@ Règles du *Standard Token Exchange* de Keycloak (≥ 26.2) utilisées ici :
 
 ## 7. Contrôles à chaque étape
 
-### API Management (le BFF)
+### Le BFF (API Management ou service Python)
 
-Les policies sont dans [platform/apim](../platform/apim). Chaque étape échoue **de façon fermée** : une erreur arrête la requête avant l'appel à l'agent.
+Implémentation : policies dans [platform/apim](../platform/apim) (mode `apim`) ou service Python dans [platform/src/bff](../platform/src/bff) (mode `code`), voir [§ 8](#8-deux-implémentations-du-bff-bff_mode). Chaque étape échoue **de façon fermée** : une erreur arrête la requête avant l'appel à l'agent.
 
 | Étape | Contrôle | Échec |
 |---|---|---|
@@ -164,31 +166,84 @@ Journalisation : Application Insights reçoit métriques et erreurs **sans en-t�
 - L'utilisateur est **toujours** déterminé par le claim `sub`, jamais par un argument que le modèle pourrait remplir.
 - Les scopes sont vérifiés **outil par outil** (`weather:read`, `favorites:write`).
 
-## 8. Identité déléguée et sessions Foundry
+## 8. Deux implémentations du BFF (`BFF_MODE`)
 
-- `x-ms-user-identity = oidc:` + SHA-256(`iss` | `sub`) : un identifiant **opaque et stable**, calculé par APIM à partir du jeton validé. Foundry s'en sert pour **isoler les conversations** de chaque utilisateur. Seule l'identité dédiée `id-apim-chat` possède la permission `UserIdentityImpersonation` (rôle personnalisé).
-- **Constat du test de sécurité** : Foundry isole les *conversations* entre utilisateurs délégués (le `previous_response_id` d'un autre utilisateur renvoie 404), mais **pas les sessions** (le bac à sable du conteneur, avec son `$HOME`). C'est pourquoi APIM **rejette tout `agent_session_id` fourni par le client** et impose une session par utilisateur : `SHA-256("session|" + identité déléguée)`.
+Le BFF est choisi dans `platform/.env` : `BFF_MODE="apim"` (défaut) ou `BFF_MODE="code"`. Les deux exposent **le même contrat** (`POST /chat/responses`, `GET /chat/me`, mêmes codes d'erreur), appliquent **les mêmes contrôles dans le même ordre**, et [tools/e2e_test.py](../tools/e2e_test.py) les valide tous les deux. L'application web, Keycloak, l'agent et le serveur MCP sont identiques.
 
-## 9. Menaces et contre-mesures (résumé)
+### Correspondance policy APIM ↔ code Python
+
+| Étape | API Management ([platform/apim](../platform/apim)) | Python ([platform/src/bff](../platform/src/bff)) |
+|---|---|---|
+| CORS | `<cors>` dans [api-chat.xml](../platform/apim/api-chat.xml) | `CORSMiddleware` dans [app.py](../platform/src/bff/app.py) |
+| Limites par IP et par utilisateur | `rate-limit-by-key` dans [api-chat.xml](../platform/apim/api-chat.xml) | `SlidingWindowLimiter` ([security.py](../platform/src/bff/security.py)), appelé par `authenticated_user` ([app.py](../platform/src/bff/app.py)) |
+| Refus des en-têtes d'identité | [reject-sensitive-headers.xml](../platform/apim/fragments/reject-sensitive-headers.xml) | `has_forbidden_header` ([security.py](../platform/src/bff/security.py)) |
+| Validation de A | `validate-jwt` dans [validate-app-token.xml](../platform/apim/fragments/validate-app-token.xml) | `validate_app_token` ([tokens.py](../platform/src/bff/tokens.py)) |
+| Identité déléguée | variable `delegatedIdentity` ([validate-app-token.xml](../platform/apim/fragments/validate-app-token.xml)) | `delegated_identity` ([tokens.py](../platform/src/bff/tokens.py)) |
+| Corps en liste blanche | [op-responses.xml](../platform/apim/op-responses.xml) | `parse_chat_body` ([app.py](../platform/src/bff/app.py)) |
+| **Échange OBO + cache** | `send-request`, `cache-lookup-value` / `cache-store-value` ([obo-exchange.xml](../platform/apim/fragments/obo-exchange.xml)) | **`OboExchanger.exchange`** ([tokens.py](../platform/src/bff/tokens.py)) |
+| Validation de B | `validate-jwt token-value` + contrôle `sub` / scope ([obo-exchange.xml](../platform/apim/fragments/obo-exchange.xml)) | `validate_mcp_token` ([tokens.py](../platform/src/bff/tokens.py)) |
+| Jeton Entra + délégation | [foundry-delegation.xml](../platform/apim/fragments/foundry-delegation.xml) | `FoundryAgentClient.respond` ([foundry.py](../platform/src/bff/foundry.py)) |
+| Session dérivée de l'identité | [op-responses.xml](../platform/apim/op-responses.xml) | `session_for` ([foundry.py](../platform/src/bff/foundry.py)) |
+| Appel de l'agent | `rewrite-uri` + `forward-request` | `POST {agent}/responses?api-version=v1` ([foundry.py](../platform/src/bff/foundry.py)), réponse relayée telle quelle |
+
+### L'échange de jeton en Python
+
+C'est une simple requête HTTP vers le token endpoint de myID ([tokens.py](../platform/src/bff/tokens.py)) :
+
+```python
+resp = await http.post(token_endpoint, data={
+    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",   # RFC 8693
+    "subject_token": token_a,                                          # jeton de l'application
+    "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+    "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+    "audience": "weather-mcp",                                         # ressource visée
+    "scope": "weather:read favorites:write",                           # accordés selon les rôles
+    "client_id": "weather-bff",                                        # client confidentiel
+    "client_secret": secret,                                           # lu dans Key Vault
+})
+token_b = resp.json()["access_token"]   # aud=weather-mcp, azp=weather-bff, même sub
+```
+
+Le BFF met ensuite B en cache (clé : empreinte SHA-256 de A, jusqu'à 60 s avant son expiration), puis **revalide B à chaque requête** : signature, `aud`, `azp = weather-bff`, même `sub` que A, scope `weather:read`.
+
+### Différences entre les deux modes
+
+| | `apim` | `code` |
+|---|---|---|
+| Code applicatif | aucun (policies XML) | ~400 lignes Python lisibles |
+| Identité appelant Foundry | `id-apim-chat` (dédiée) | `id-bff` (dédiée) |
+| Limitation de débit | approximative (compteurs APIM v2 asynchrones) | exacte (un seul réplica ; Redis pour passer à l'échelle) |
+| Tests | bout en bout uniquement | [tests locaux sans Azure](../tools/test_bff_local.py) + bout en bout |
+| Déploiement | plus long et plus coûteux (service API Management) | plus rapide et moins coûteux (une Container App) |
+| Extensions possibles | gouvernance, quotas, AI Gateway, catalogue d'API | logique métier, DPoP, tests unitaires |
+
+**Un environnement = un mode** : `deploy.ps1` refuse de changer le mode d'un environnement existant. Sinon, l'identité de l'ancien mode conserverait son droit d'impersonation. Utilisez un autre environnement azd / resource group, ou supprimez d'abord l'environnement avec `teardown.ps1`.
+
+## 9. Identité déléguée et sessions Foundry
+
+- `x-ms-user-identity = oidc:` + SHA-256(`iss` | `sub`) : un identifiant **opaque et stable**, calculé par le BFF à partir du jeton validé. Foundry s'en sert pour **isoler les conversations** de chaque utilisateur. Seule l'identité dédiée du BFF (`id-apim-chat` ou `id-bff`) possède la permission `UserIdentityImpersonation` (rôle personnalisé).
+- **Constat du test de sécurité** : Foundry isole les *conversations* entre utilisateurs délégués (le `previous_response_id` d'un autre utilisateur renvoie 404), mais **pas les sessions** (le bac à sable du conteneur, avec son `$HOME`). C'est pourquoi le BFF **rejette tout `agent_session_id` fourni par le client** et impose une session par utilisateur : `SHA-256("session|" + identité déléguée)`.
+
+## 10. Menaces et contre-mesures (résumé)
 
 | Menace | Contre-mesure |
 |---|---|
 | Vol de jeton sur le terminal | PKCE, pas de secret embarqué, jetons courts, rotation des refresh tokens ; le terminal n'a jamais de jeton pour le MCP |
 | Rejeu de A contre le MCP | Audiences distinctes : le MCP refuse A |
 | Obtention de B par un autre client | Échange réservé au client confidentiel ; le MCP exige `azp = weather-bff` |
-| Usurpation via les en-têtes d'identité | Rejetés par APIM ; recalculés à partir du jeton validé |
-| Choix de la session d'un autre utilisateur | Session imposée par APIM, dérivée de l'identité |
+| Usurpation via les en-têtes d'identité | Rejetés par le BFF ; recalculés à partir du jeton validé |
+| Choix de la session d'un autre utilisateur | Session imposée par le BFF, dérivée de l'identité |
 | Injection de champs Responses (`tools`, `instructions`…) | Corps reconstruit à partir d'une liste blanche |
 | Injection de prompt (exfiltration, usurpation) | Le modèle ne voit aucun jeton ; l'identité vient du `sub` validé |
 | Fuite dans les journaux | Aucun en-tête ni corps journalisé ; jetons jamais écrits |
-| Jeton forgé ou expiré | Rejet par APIM, l'agent et le serveur MCP |
+| Jeton forgé ou expiré | Rejet par le BFF, l'agent et le serveur MCP |
 
-Ces cas sont vérifiés par [tools/e2e_test.py](../tools/e2e_test.py) (31 tests) à chaque déploiement.
+Ces cas sont vérifiés par [tools/e2e_test.py](../tools/e2e_test.py) (31 tests) à chaque déploiement, dans les deux modes du BFF.
 
-## 10. Limites et compromis du POC
+## 11. Limites et compromis du POC
 
 - Le jeton B **transite par la passerelle Foundry**, en en-tête, sans persistance dans l'historique.
-- La **confiance dans APIM est centrale** : il échange les jetons et déclare l'identité à Foundry. D'où l'identité dédiée, les policies versionnées et le test de sécurité à chaque déploiement.
+- La **confiance dans le BFF est centrale** (APIM ou service Python) : il échange les jetons et déclare l'identité à Foundry. D'où l'identité dédiée, le code ou les policies versionnés et le test de sécurité à chaque déploiement.
 - Keycloak n'ajoute pas de claim `act` : la chaîne de délégation se reconstitue par `azp` et par les journaux de myID.
-- La limitation de débit d'APIM v2 est **approximative** : les compteurs sont synchronisés de façon asynchrone.
+- La limitation de débit d'APIM v2 est **approximative** (compteurs synchronisés de façon asynchrone) ; celle du BFF Python est exacte mais locale au réplica.
 - Tout est **public** pour le POC. En production, prévoir Front Door + WAF devant APIM, des backends privés, Keycloak en haute disponibilité, et l'authentification de `weather-bff` par `private_key_jwt` ou mTLS.

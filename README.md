@@ -1,32 +1,47 @@
-# POC : identité utilisateur de bout en bout (Keycloak / myID → APIM → Agent hébergé Foundry → MCP)
+# POC : identité utilisateur de bout en bout (Keycloak / myID → BFF → Agent hébergé Foundry → MCP)
 
 Ce POC montre comment propager l'identité d'un utilisateur authentifié par un **IdP externe OAuth 2 / OIDC**, ici un Keycloak qui joue le rôle de **myID**, jusqu'à un **serveur MCP**. Le chemin passe par un **agent hébergé Microsoft Foundry**, sans Entra ID pour les utilisateurs finaux.
 
-Le **BFF est Azure API Management** : il n'y a aucun code applicatif. Des policies APIM valident le jeton de l'application, obtiennent le jeton destiné au MCP par **échange de jeton On-Behalf-Of (RFC 8693)** et délèguent l'identité de l'utilisateur à Foundry. L'application ne détient jamais de jeton pour le MCP.
+Le **BFF** valide le jeton de l'application, obtient le jeton destiné au MCP par **échange de jeton On-Behalf-Of (RFC 8693)** et délègue l'identité de l'utilisateur à Foundry. L'application ne détient jamais de jeton pour le MCP. Le BFF existe en **deux implémentations interchangeables**, choisies par `BFF_MODE` :
+- **`apim`** (défaut) : des **policies Azure API Management**, sans aucun code applicatif ;
+- **`code`** : un **service Python** (FastAPI) qui montre l'échange de jeton en clair.
+
+Les deux respectent le même contrat d'API et passent la même suite de tests de sécurité.
 
 Cas d'usage : un chat qui donne la météo d'une ville. Les outils MCP connaissent l'utilisateur (`whoami`, favoris par utilisateur).
 
 > 📚 **Documentation détaillée** dans le répertoire [docs/](docs/) :
-> - [Architecture et flux d'authentification](docs/ARCHITECTURE.md) : schéma de flux, diagramme de séquence, jetons, contrôles de sécurité ;
+> - [Architecture et flux d'authentification](docs/ARCHITECTURE.md) : schéma de flux, diagramme de séquence, jetons, contrôles de sécurité, [correspondance policies APIM ↔ code Python](docs/ARCHITECTURE.md#8-deux-implémentations-du-bff-bff_mode) ;
 > - [Configuration Keycloak (myID)](docs/KEYCLOAK.md) ;
 > - [Principes d'authentification (Word)](docs/Authentification-principes.docx).
 
 ## Architecture
 
-![Architecture : myID (Keycloak) → API Management (BFF) → agent hébergé Foundry → serveur MCP](docs/diagrams/architecture.png)
+![Architecture : myID (Keycloak) → BFF (API Management ou service Python) → agent hébergé Foundry → serveur MCP](docs/diagrams/architecture.png)
 
 Détail des flux, des jetons et des contrôles : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 | Problème | Solution |
 |---|---|
-| `"tools": Not allowed when agent is specified` | Les outils sont définis **dans le code de l'agent hébergé**. APIM reconstruit le corps de la requête : seuls `input` et `previous_response_id` passent (la session de l'agent est imposée par la passerelle). |
-| Foundry n'accepte que des jetons Entra | APIM appelle Foundry avec une **identité managée dédiée** (`id-apim-chat`) et délègue l'identité de l'utilisateur via `x-ms-user-identity` (rôle custom `UserIdentityImpersonation`). |
+| `"tools": Not allowed when agent is specified` | Les outils sont définis **dans le code de l'agent hébergé**. Le BFF reconstruit le corps de la requête : seuls `input` et `previous_response_id` passent (la session de l'agent est imposée par la passerelle). |
+| Foundry n'accepte que des jetons Entra | Le BFF appelle Foundry avec une **identité managée dédiée** (`id-apim-chat` ou `id-bff`) et délègue l'identité de l'utilisateur via `x-ms-user-identity` (rôle custom `UserIdentityImpersonation`). |
 | Le conteneur ne reçoit pas `Authorization` | Le jeton MCP passe dans l'en-tête **`x-client-mcp-token`**. Les en-têtes `x-client-*` sont les seuls en-têtes personnalisés que la passerelle Foundry transmet. |
-| Pas de jeton MCP sur le terminal | **OBO** : seul APIM (client confidentiel `weather-bff`) peut obtenir B, et le MCP n'accepte que `azp=weather-bff`. |
+| Pas de jeton MCP sur le terminal | **OBO** : seul le BFF (client confidentiel `weather-bff`) peut obtenir B, et le MCP n'accepte que `azp=weather-bff`. |
 | Usurpation d'identité par le client | Un client qui envoie `x-ms-user-identity`, `x-client-*` ou `x-agent-*` est **rejeté** (400). |
 | Concurrence entre utilisateurs | Le jeton est lié au contexte de la requête (`ContextVar`). Le `header_provider` reconnecte la session MCP quand l'identité change. |
 
-### Policies APIM ([platform/apim](platform/apim))
+### Le BFF : deux implémentations (`BFF_MODE`)
+
+| | `apim` (défaut) | `code` |
+|---|---|---|
+| Implémentation | policies [platform/apim](platform/apim) | service Python [platform/src/bff](platform/src/bff) |
+| Identité appelant Foundry | `id-apim-chat` | `id-bff` |
+| Tests | bout en bout | [tests locaux sans Azure](tools/test_bff_local.py) + bout en bout |
+| Déploiement | plus long et plus coûteux (API Management) | plus rapide (une Container App) |
+
+Correspondance détaillée policy ↔ fonction Python : [docs/ARCHITECTURE.md § 8](docs/ARCHITECTURE.md#8-deux-implémentations-du-bff-bff_mode).
+
+#### Mode `apim` : policies ([platform/apim](platform/apim))
 
 | Fichier | Rôle |
 |---|---|
@@ -40,7 +55,19 @@ Détail des flux, des jetons et des contrôles : [docs/ARCHITECTURE.md](docs/ARC
 
 Journalisation : Application Insights **sans en-têtes ni corps** (aucun jeton dans les journaux).
 
-> **Constat du test de sécurité** : Foundry isole les *conversations* entre utilisateurs délégués (`previous_response_id` d'un autre utilisateur → 404), mais **pas les sessions** (bac à sable du conteneur). C'est pourquoi la passerelle choisit elle-même la session de l'agent.
+#### Mode `code` : service Python ([platform/src/bff](platform/src/bff))
+
+| Fichier | Rôle (équivalent APIM) |
+|---|---|
+| `app.py` | routes `/chat/responses` et `/chat/me`, CORS, enchaînement des contrôles, corps en liste blanche (`api-chat.xml`, `op-*.xml`) |
+| `security.py` | refus des en-têtes d'identité, limites par IP et par utilisateur (`reject-sensitive-headers.xml`, `rate-limit-by-key`) |
+| `tokens.py` | validation de A, identité déléguée, **échange OBO** avec cache, validation de B (`validate-app-token.xml`, `obo-exchange.xml`) |
+| `foundry.py` | jeton Entra de `id-bff`, en-têtes de délégation, session dérivée, appel de l'agent (`foundry-delegation.xml`) |
+| `settings.py` | configuration (variables d'environnement) |
+
+Aucun jeton n'est journalisé ; la réponse de l'agent est relayée telle quelle.
+
+> **Constat du test de sécurité** : Foundry isole les *conversations* entre utilisateurs délégués (`previous_response_id` d'un autre utilisateur → 404), mais **pas les sessions** (bac à sable du conteneur). C'est pourquoi le BFF, dans les deux modes, choisit lui-même la session de l'agent.
 
 ## Arborescence
 
@@ -50,14 +77,16 @@ weather-agent/                    projet azd : projet Foundry + modèle + agent 
   infra/                          Bicep Foundry (issu de `azd ai agent init --infra`, resource group existant supporté)
   src/weather-agent/main.py       agent Agent Framework (middleware + MCP header_provider)
 platform/
-  infra/main.bicep                ACR, Container Apps (Keycloak, MCP, web), PostgreSQL, Key Vault, App Insights, APIM, identités, rôles Foundry
+  infra/main.bicep                ACR, Container Apps (Keycloak, MCP, web, BFF Python), PostgreSQL, Key Vault, App Insights, APIM, identités, rôles Foundry
   infra/apim-config.bicep         configuration APIM : named values, fragments, API « chat », diagnostics
-  apim/                           policies APIM (le BFF)
+  apim/                           policies APIM (le BFF en mode apim)
   keycloak/                       image Keycloak, realm-config.json (source de vérité), configure_realm.py
   src/mcp-weather/server.py       serveur MCP météo (Open-Meteo), validation JWT
+  src/bff/                        BFF Python (mode code) : même contrat que les policies APIM
   src/web/                        client web statique (nginx, oidc-client-ts, config et CSP injectées au démarrage)
   .env.example                    paramètres de déploiement → copier en platform/.env
-tools/e2e_test.py                 test de bout en bout et de sécurité (lancé par deploy.ps1)
+tools/e2e_test.py                 test de bout en bout et de sécurité (lancé par deploy.ps1, identique pour les deux modes)
+tools/test_bff_local.py           tests locaux du BFF Python (faux IdP + faux agent, sans Azure)
 tools/fake_idp.py                 faux émetteur OIDC (avec token exchange) pour les tests locaux
 docs/ARCHITECTURE.md              architecture et flux d'authentification (avec diagrammes)
 docs/KEYCLOAK.md                  configuration Keycloak / transposition au vrai myID
@@ -84,7 +113,7 @@ Le déploiement se fait **entièrement dans Azure** : les images sont construite
 
 **Droits Azure** : rôle **Owner** (ou *Contributor* + *User Access Administrator*) sur la souscription ou sur le resource group cible. Le déploiement crée un rôle personnalisé et des role assignments.
 
-**Région** : une région qui propose à la fois les **hosted agents Foundry**, le modèle `gpt-5.4-mini` (GlobalStandard) et **API Management v2**. Le POC est validé en **France Central**.
+**Région** : une région qui propose à la fois les **hosted agents Foundry**, le modèle `gpt-5.4-mini` (GlobalStandard) et, en mode `apim`, **API Management v2**. Le POC est validé en **France Central**.
 
 ### 2. Préparer le poste (une seule fois)
 
@@ -111,9 +140,10 @@ python -m venv .venv-dev
 Copy-Item platform\.env.example platform\.env
 ```
 
-Dans `platform/.env`, renseignez le nom de l'environnement (`AZD_ENVIRONMENT`), la région (`AZURE_LOCATION`) et le resource group (`AZURE_RESOURCE_GROUP`). Ce fichier ne contient **aucun secret** : ils sont générés par le script et stockés uniquement dans le Key Vault.
+Dans `platform/.env`, renseignez le nom de l'environnement (`AZD_ENVIRONMENT`), la région (`AZURE_LOCATION`), le resource group (`AZURE_RESOURCE_GROUP`) et le mode du BFF (`BFF_MODE` : `apim` ou `code`). Ce fichier ne contient **aucun secret** : ils sont générés par le script et stockés uniquement dans le Key Vault.
 - **Resource group existant** : il est réutilisé tel quel, avec sa région. **Ses tags ne sont jamais modifiés** : [weather-agent/infra/main.bicep](weather-agent/infra/main.bicep) ne crée le groupe que s'il n'existe pas, et `deploy.ps1` vérifie les tags après chaque étape.
 - Sinon, le resource group est créé.
+- **Un environnement = un mode** : `deploy.ps1` refuse de changer `BFF_MODE` sur un environnement existant. Pour comparer les deux modes, utilisez deux environnements (deux resource groups).
 
 ### 4. Déployer
 
@@ -121,13 +151,13 @@ Dans `platform/.env`, renseignez le nom de l'environnement (`AZD_ENVIRONMENT`), 
 pwsh ./deploy.ps1
 ```
 
-Durée : environ **30 à 45 minutes** pour un premier déploiement (API Management et PostgreSQL sont les plus longs). Le script enchaîne :
+Durée : environ **30 à 45 minutes** pour un premier déploiement en mode `apim` (API Management et PostgreSQL sont les plus longs), un peu moins en mode `code`. Le script enchaîne :
 1. création de l'environnement azd ;
 2. `azd provision` (projet Foundry et modèle) ;
-3. registre, environnement Container Apps, Key Vault, identités, App Insights et service API Management ;
+3. registre, environnement Container Apps, Key Vault, identités, App Insights et, en mode `apim`, service API Management ;
 4. génération des secrets dans le Key Vault et build distant des images ;
-5. PostgreSQL, Keycloak, MCP et application web ;
-6. configuration du realm Keycloak, puis de l'API « chat » d'APIM (les policies ont besoin du realm) ;
+5. PostgreSQL, Keycloak, MCP, application web et, en mode `code`, BFF Python ;
+6. configuration du realm Keycloak, puis, en mode `apim`, de l'API « chat » d'APIM (les policies ont besoin du realm) ;
 7. `azd deploy` de l'agent ;
 8. test de bout en bout et de sécurité (usurpation d'en-têtes, jeton falsifié, corps en liste blanche, accès croisé entre utilisateurs, CORS, limitation de débit).
 
@@ -179,13 +209,21 @@ Invoke-RestMethod http://127.0.0.1:8088/responses -Method Post -ContentType 'app
 
 Dans VS Code, **F5** lance l'agent local avec le débogueur et ouvre l'Agent Inspector de Foundry Toolkit. Il faut fournir l'en-tête `x-client-mcp-token`, sinon l'agent répond 401.
 
+**BFF Python** (mode `code`) : 35 contrôles de sécurité en local, sans Azure, avec le faux IdP (qui sait faire l'échange de jeton) et un faux agent :
+
+```powershell
+.\.venv-dev\Scripts\pip install -r platform\src\bff\requirements.txt starlette
+.\.venv-dev\Scripts\python tools\test_bff_local.py
+```
+
 Les policies APIM ne s'exécutent pas localement : elles sont validées par le test de bout en bout ([tools/e2e_test.py](tools/e2e_test.py)) lancé à chaque déploiement.
 
 ## Sécurité : ce qui reste à faire pour la production
 
 - Keycloak en haute disponibilité (AKS + Keycloak Operator), PostgreSQL en haute disponibilité et en accès privé, custom domain, WAF, console d'administration non exposée.
 - Authentifier `weather-bff` (utilisé par APIM) par `private_key_jwt` ou mTLS plutôt que par un secret.
-- Front Door + WAF devant APIM, puis APIM et backends en réseau privé.
+- Front Door + WAF devant le BFF, puis BFF et backends en réseau privé.
+- BFF Python : plusieurs réplicas avec une limitation de débit partagée (Azure Cache for Redis).
 - Placer aussi le serveur MCP derrière APIM (`validate-jwt`, rate limiting), ou le rendre privé.
 - Persister l'état du MCP (favoris) dans un vrai stockage, partitionné par `sub`.
 - Mettre en place des alertes sur les échecs de validation et d'échange de jetons (App Insights d'APIM, logs MCP et Keycloak).

@@ -59,7 +59,7 @@ out.append(
 )
 
 # Title
-text(W / 2, 38, "Identité utilisateur de bout en bout : myID (Keycloak) → API Management → Agent Foundry → MCP", size=22, weight="bold", color="#1F3864")
+text(W / 2, 38, "Identité utilisateur de bout en bout : myID (Keycloak) → BFF → Agent Foundry → MCP", size=22, weight="bold", color="#1F3864")
 
 # Identity providers (top)
 rect(40, 80, 900, 96, "#FFF4E5", "#E8710A", rx=14, sw=2.5)
@@ -67,15 +67,15 @@ text(490, 110, "myID = Keycloak · realm « weather »", size=19, weight="bold",
 text(490, 145, "Clients : weather-mobile (public, PKCE) · weather-bff (confidentiel, token exchange) · weather-mcp (audience) · JWKS", size=13.5, color="#5F2B00")
 rect(1010, 80, 420, 96, "#E6F4EA", "#188038", rx=14, sw=2.5)
 text(1220, 110, "Microsoft Entra ID", size=19, weight="bold", color="#188038")
-text(1220, 145, "identité managée dédiée d'APIM uniquement", size=13.5, color="#0D3B1E")
+text(1220, 145, "identité managée dédiée du BFF uniquement", size=13.5, color="#0D3B1E")
 
 # Components (main chain)
 CY, CH = 330, 300
 comps = [
     (40, 290, "App web / mobile", "client public weather-mobile", ["Login OIDC + PKCE", "Jeton A uniquement", "Aucun secret embarqué"], "#D93025"),
-    (400, 380, "API Management · API « chat »", "= BFF, sans code (policies)", [
+    (400, 380, "BFF · API « chat »", "API Management (apim) ou Python (code)", [
         "Refus des en-têtes d'identité",
-        "validate-jwt A (aud, azp, exp)",
+        "Validation de A (aud, azp, exp)",
         "Échange A → B (OBO) + cache",
         "Validation de B (aud, azp, sub)",
         "Corps en liste blanche, CORS",
@@ -121,10 +121,10 @@ LY = 665
 rect(40, LY, 1620, 170, "#F8F9FA", "#DADCE0", rx=12, sw=1.2)
 steps = [
     ("1", "#E8710A", "Login myID (PKCE) → jeton A : aud = weather-bff, azp = weather-mobile"),
-    ("2", "#1A73E8", "App → APIM : Authorization: Bearer A"),
-    ("3", "#8430CE", "APIM échange A → B auprès de myID : aud = weather-mcp, azp = weather-bff, même sub"),
-    ("4", "#188038", "APIM obtient le jeton Entra E de son identité managée dédiée"),
-    ("5", "#188038", "APIM → Agent : Bearer E · x-ms-user-identity · x-client-mcp-token: B · session dérivée"),
+    ("2", "#1A73E8", "App → BFF : Authorization: Bearer A"),
+    ("3", "#8430CE", "Le BFF échange A → B auprès de myID : aud = weather-mcp, azp = weather-bff, même sub"),
+    ("4", "#188038", "Le BFF obtient le jeton Entra E de son identité managée dédiée"),
+    ("5", "#188038", "BFF → Agent : Bearer E · x-ms-user-identity · x-client-mcp-token: B · session dérivée"),
     ("6", "#8430CE", "Agent → MCP : Authorization: Bearer B"),
 ]
 for i, (n, color, desc) in enumerate(steps):

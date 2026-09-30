@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 import httpx
@@ -126,6 +127,23 @@ def _display_name(token: AccessToken) -> str | None:
     return None
 
 
+_open_meteo_client: httpx.AsyncClient | None = None
+
+
+def _open_meteo() -> httpx.AsyncClient:
+    """Shared client: keep-alive avoids a TLS handshake per call, and a short connect timeout
+    with retries absorbs the intermittent TLS handshake stalls seen from Container Apps egress."""
+    global _open_meteo_client
+    if _open_meteo_client is None:
+        _open_meteo_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(8.0, connect=2.5),
+            transport=httpx.AsyncHTTPTransport(
+                retries=3, limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=60)
+            ),
+        )
+    return _open_meteo_client
+
+
 async def _geocode(client: httpx.AsyncClient, city: str) -> dict[str, Any] | None:
     resp = await client.get(
         "https://geocoding-api.open-meteo.com/v1/search",
@@ -143,10 +161,14 @@ async def get_weather(city: str) -> dict[str, Any]:
     _require_scope(user, READ_SCOPE)
     logger.info("get_weather city=%s sub=%s", city, user.subject)
 
-    async with httpx.AsyncClient(timeout=10) as client:
+    client = _open_meteo()
+    started = time.monotonic()
+    step = "geocoding"
+    try:
         place = await _geocode(client, city)
         if place is None:
             return {"error": f"Ville introuvable : {city}"}
+        step = "forecast"
         resp = await client.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
@@ -158,6 +180,14 @@ async def get_weather(city: str) -> dict[str, Any]:
         )
         resp.raise_for_status()
         current = resp.json()["current"]
+    except httpx.HTTPError as exc:
+        status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        logger.warning(
+            "get_weather failed city=%s step=%s error=%s status=%s elapsed=%.2fs",
+            city, step, type(exc).__name__, status, time.monotonic() - started,
+        )
+        return {"error": "Service météo temporairement indisponible, réessayez dans quelques instants."}
+    logger.info("get_weather ok city=%s elapsed=%.2fs", city, time.monotonic() - started)
 
     return {
         "city": place["name"],

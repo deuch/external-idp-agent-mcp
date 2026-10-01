@@ -131,11 +131,26 @@ $settings = [ordered]@{
     USE_EXISTING_AI_PROJECT = 'false'; AZD_AGENT_SKIP_ACR = 'true'; MCP_AUDIENCE = 'weather-mcp'; BFF_MODE = $bffMode
 }
 foreach ($k in $settings.Keys) { Invoke-Azd env set $k $settings[$k] -e $envName | Out-Null }
+# The microsoft.foundry provider and the azure.ai.agents extension resolve the DEFAULT azd environment
+# even when -e is given: select the target environment, otherwise another environment is provisioned.
+Invoke-Azd env select $envName | Out-Null
+
+function Assert-AzdTarget([string]$Step) {
+    $values = Get-AzdValues $envName
+    if ($values.AZURE_RESOURCE_GROUP -ne $rg) {
+        throw "azd environment '$envName' targets '$($values.AZURE_RESOURCE_GROUP)' after '$Step' (expected '$rg'); check 'azd env select'"
+    }
+    if ($values.AZURE_AI_ACCOUNT_NAME) {
+        $accounts = @(Invoke-Az cognitiveservices account list -g $rg --query "[].name" -o tsv)
+        if ($accounts -notcontains $values.AZURE_AI_ACCOUNT_NAME) { throw "Foundry account '$($values.AZURE_AI_ACCOUNT_NAME)' of '$envName' is not in '$rg' after '$Step'" }
+    }
+    return $values
+}
 
 Write-Host "==> 2/8 Foundry project + model (azd provision, weather-agent/infra)" -ForegroundColor Cyan
 Invoke-Azd provision -e $envName --no-prompt
 Assert-RgTagsUnchanged 'azd provision'
-$azd = Get-AzdValues $envName
+$azd = Assert-AzdTarget 'azd provision'
 $deployer = Invoke-Az ad signed-in-user show --query id -o tsv
 $common = @(
     "deployerObjectId=$deployer", "foundryAccountName=$($azd.AZURE_AI_ACCOUNT_NAME)",
@@ -209,7 +224,15 @@ Write-Host "==> 7/8 Hosted agent (azd deploy)" -ForegroundColor Cyan
 Invoke-Azd env set MCP_SERVER_URL $mcpUrl -e $envName | Out-Null
 Invoke-Azd env set OIDC_ISSUER $issuer -e $envName | Out-Null
 Invoke-Azd env set OIDC_JWKS_URI $out.jwksUri.value -e $envName | Out-Null
-Invoke-Azd deploy weather-agent -e $envName --no-prompt
+Invoke-Azd env select $envName | Out-Null
+Assert-AzdTarget 'before azd deploy' | Out-Null
+# The azure.ai.agents extension intermittently fails to get a token (AzureDeveloperCLICredential): retry once.
+try { Invoke-Azd deploy weather-agent -e $envName --no-prompt }
+catch {
+    Write-Warning "azd deploy failed ($_), retrying in 30 s"
+    Start-Sleep -Seconds 30
+    Invoke-Azd deploy weather-agent -e $envName --no-prompt
+}
 Assert-RgTagsUnchanged 'azd deploy'
 
 # Non-secret deployment record (useful to compare or rebuild an environment).

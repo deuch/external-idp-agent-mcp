@@ -88,7 +88,7 @@ out.append(
 # Trust zones (background)
 zones = [
     ("app", "Zone utilisateur", "non fiable", "#FCE8E6", "#D93025", 40, 360),
-    ("bff", "API Management", "de confiance", "#E6F4EA", "#188038", 440, 340),
+    ("bff", "BFF (APIM ou Python)", "de confiance", "#E6F4EA", "#188038", 440, 340),
     ("foundry", "Microsoft Foundry", "plateforme managée", "#E8F0FE", "#1A73E8", 830, 830),
     ("mcp", "Ressource protégée", "resource server", "#F3E8FD", "#8430CE", 1710, 360),
 ]
@@ -104,11 +104,11 @@ text(1055, IDP_Y + 18, "Clients : weather-mobile (public, PKCE) · weather-bff (
 # Entra
 rect(COLS["gw"] - 135, ENTRA_Y - 34, 270, 68, "#FFFFFF", "#188038", rx=10, sw=2.5)
 text(COLS["gw"], ENTRA_Y - 10, "Microsoft Entra ID", size=16, weight="bold", color="#188038")
-text(COLS["gw"], ENTRA_Y + 14, "identité dédiée d'APIM uniquement", size=13, color="#3C4043")
+text(COLS["gw"], ENTRA_Y + 14, "identité dédiée du BFF uniquement", size=13, color="#3C4043")
 
 # Main chain
 box(COLS["app"], CHAIN_Y, BOX_W, BOX_H, "App mobile / web", ["Client public weather-mobile", "PKCE · jeton A uniquement"], "#FFFFFF", "#D93025")
-box(COLS["bff"], CHAIN_Y, BOX_W, BOX_H, "APIM · API chat", ["BFF sans code (policies)", "Client confidentiel weather-bff"], "#FFFFFF", "#188038")
+box(COLS["bff"], CHAIN_Y, BOX_W, BOX_H, "BFF · API chat", ["APIM (policies) ou ca-bff (Python)", "Client confidentiel weather-bff"], "#FFFFFF", "#188038")
 box(COLS["gw"], CHAIN_Y, BOX_W, BOX_H, "Gateway Foundry", ["RBAC + impersonation", "Isolation par utilisateur"], "#FFFFFF", "#1A73E8")
 box(COLS["agent"], CHAIN_Y, BOX_W, BOX_H, "Agent hébergé", ["Agent Framework", "Jeton lié à la requête"], "#FFFFFF", "#1A73E8")
 box(COLS["mcp"], CHAIN_Y, BOX_W, BOX_H, "Serveur MCP", ["Resource server weather-mcp", "Identité = claim sub"], "#FFFFFF", "#8430CE")
@@ -176,8 +176,8 @@ text(60, ly - 36, "Jetons", size=16, weight="bold", anchor="start")
 x = 60
 x += pill(x, ly, "A", "A · jeton utilisateur · aud = weather-bff · azp = weather-mobile · 5 min") + 24
 x += pill(x, ly, "B", "B · jeton utilisateur (OBO) · aud = weather-mcp · azp = weather-bff · 5 min") + 24
-pill(x, ly, "E", "E · jeton Entra (identité APIM dédiée) · aud = Foundry")
-text(60, ly + 44, "Le même utilisateur (sub) est porté par A et B. Seul APIM (le BFF) peut obtenir B (échange de jeton) ; Foundry voit l'identité déléguée x-ms-user-identity ; seul le MCP consomme B.",
+pill(x, ly, "E", "E · jeton Entra (identité dédiée du BFF) · aud = Foundry")
+text(60, ly + 44, "Le même utilisateur (sub) est porté par A et B. Seul le BFF (APIM ou service Python) peut obtenir B (échange de jeton) ; Foundry voit l'identité déléguée x-ms-user-identity ; seul le MCP consomme B.",
      size=14, color="#3C4043", anchor="start")
 
 out.append("</svg>")

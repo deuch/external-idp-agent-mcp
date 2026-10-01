@@ -3,7 +3,7 @@ sequenceDiagram
     actor U as Utilisateur
     participant App as App mobile<br/>(client public weather-mobile)
     participant KC as myID = Keycloak<br/>(realm, émetteur unique)
-    participant BFF as APIM · API chat (BFF)<br/>client confidentiel weather-bff
+    participant BFF as BFF · API chat<br/>APIM (policies) ou ca-bff (Python)<br/>client confidentiel weather-bff
     participant Entra as Microsoft<br/>Entra ID
     participant GW as Gateway<br/>Foundry
     participant Agent as Agent hébergé
@@ -33,7 +33,7 @@ sequenceDiagram
     end
     Note right of BFF: Vérifie B : même sub que A, azp=weather-bff, weather:read
     BFF->>Entra: Jeton managed identity
-    Entra-->>BFF: Jeton E (identité managée dédiée d'APIM)
+    Entra-->>BFF: Jeton E (identité dédiée du BFF : id-apim-chat ou id-bff)
     BFF->>GW: POST /responses · Bearer E<br/>x-ms-user-identity: oidc:sha256(iss|sub) · x-client-mcp-token: B<br/>agent_session_id dérivé de l'identité (jamais fourni par le client)
     Note right of GW: RBAC + UserIdentityImpersonation<br/>isolation par utilisateur
     GW->>Agent: /responses (Authorization retiré, x-client-* transmis)

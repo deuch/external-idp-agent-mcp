@@ -10,6 +10,9 @@ Les deux respectent le même contrat d'API et passent la même suite de tests de
 
 Cas d'usage : un chat qui donne la météo d'une ville. Les outils MCP connaissent l'utilisateur (`whoami`, favoris par utilisateur).
 
+> 🎯 **Périmètre de ce POC.** Il démontre **l'échange de jeton On-Behalf-Of avec un IdP externe**, de l'application jusqu'au serveur MCP, avec un seul agent et un seul serveur MCP. Il reste volontairement léger : un script, un resource group.
+> La **gouvernance à l'échelle** (registre Git / API Center, périmètres de sécurité, droits par défaut, plusieurs agents et serveurs MCP) fait l'objet d'un POC séparé : [deuch/agent-mcp-governance](https://github.com/deuch/agent-mcp-governance), construit à partir de la version `v1.0` de ce dépôt.
+
 > 📚 **Documentation détaillée** dans le répertoire [docs/](docs/) :
 > - [Architecture et flux d'authentification](docs/ARCHITECTURE.md) : schéma de flux, diagramme de séquence, jetons, contrôles de sécurité, [correspondance policies APIM ↔ code Python](docs/ARCHITECTURE.md#8-deux-implémentations-du-bff-bff_mode) ;
 > - [Configuration Keycloak (myID)](docs/KEYCLOAK.md) ;
